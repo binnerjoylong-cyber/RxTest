@@ -1,6 +1,8 @@
 import asyncio
+import inspect
 import math
 import os
+import random
 import time
 from random import randint
 from time import time
@@ -17,11 +19,6 @@ from Oneforall.core.mongo import mongodb
 from Oneforall.misc import db
 from Oneforall.utils.database import add_active_video_chat, get_lang, remove_active_video_chat
 from Oneforall.utils.decorators.language import language, languageCB
-from Oneforall.utils.inline.playlist import (
-    botplaylist_markup,
-    get_playlist_markup,
-    warning_markup,
-)
 from Oneforall.utils.inline.rich import (
     deliver_rich,
     edit_rich,
@@ -48,6 +45,15 @@ PAGE_SIZE = 7
 
 async def _lang(chat_id):
     return get_string(await get_lang(chat_id))
+
+
+async def _call_db_func(func, *args, **kwargs):
+    if inspect.iscoroutinefunction(func):
+        return await func(*args, **kwargs)
+    res = func(*args, **kwargs)
+    if inspect.isawaitable(res):
+        return await res
+    return res
 
 
 async def _get_playlists(chat_id: int) -> Dict[str, dict]:
@@ -86,6 +92,80 @@ async def delete_playlist(chat_id: int, name: str) -> bool:
         )
         return True
     return False
+
+
+async def get_rich_see_page(user_id: int, page: int = 0):
+    all_tracks = await get_playlist_names(user_id)
+    total_tracks = len(all_tracks)
+    if total_tracks == 0:
+        return [], 0, 0
+
+    total_pages = math.ceil(total_tracks / PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+
+    start = page * PAGE_SIZE
+    end = start + PAGE_SIZE
+    current_batch = all_tracks[start:end]
+
+    blocks = []
+    for idx, x in enumerate(current_batch, start=start + 1):
+        _note = await get_playlist(user_id, x)
+        title = _note["title"].title() if (_note and isinstance(_note, dict) and "title" in _note) else str(x)
+        blocks.append(
+            types.InputRichBlockButtons(
+                buttons=[
+                    types.RichMessageButton(
+                        text=f"▶️ {idx}. {title[:28]}",
+                        style=enums.ButtonStyle.SUCCESS,
+                        callback_data=f"play_from_here|{user_id}|{x}",
+                    )
+                ]
+            )
+        )
+
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(
+            types.RichMessageButton(
+                text="⬅️ Back",
+                style=enums.ButtonStyle.DEFAULT,
+                callback_data=f"see_page|{user_id}|{page - 1}",
+            )
+        )
+    nav_buttons.append(
+        types.RichMessageButton(
+            text=f"📄 {page + 1}/{total_pages}",
+            style=enums.ButtonStyle.DEFAULT,
+            callback_data="see_page_indicator",
+        )
+    )
+    if page < total_pages - 1:
+        nav_buttons.append(
+            types.RichMessageButton(
+                text="Next ➡️",
+                style=enums.ButtonStyle.DEFAULT,
+                callback_data=f"see_page|{user_id}|{page + 1}",
+            )
+        )
+    blocks.append(types.InputRichBlockButtons(buttons=nav_buttons))
+
+    blocks.append(
+        types.InputRichBlockButtons(
+            buttons=[
+                types.RichMessageButton(
+                    text="🔀 Shuffle",
+                    style=enums.ButtonStyle.PRIMARY,
+                    callback_data=f"stream_user_plist|a|{user_id}|shuffle",
+                ),
+                types.RichMessageButton(
+                    text="✖ Close",
+                    style=enums.ButtonStyle.DANGER,
+                    callback_data="close",
+                ),
+            ]
+        )
+    )
+    return blocks, total_tracks, total_pages
 
 
 async def get_rich_del_page(user_id: int, page: int = 0):
@@ -188,14 +268,30 @@ async def check_playlist(client, message: Message, _):
         return await message.reply_text(_["playlist_3"])
 
     caption = (
-        "<blockquote><emoji id=5895705279416241926>📑</emoji> <u><b>YOUR SAVED PLAYLIST</b></u></blockquote>\n\n"
+        "<blockquote><tg-emoji emoji-id=\"5895705279416241926\">📑</tg-emoji> <u><b>YOUR SAVED PLAYLIST</b></u></blockquote>\n\n"
         "<blockquote expandable>"
-        f"<emoji id=6066395745139824604>👤</emoji> <b>User :</b> {message.from_user.mention}\n"
+        f"<tg-emoji emoji-id=\"6066395745139824604\">👤</tg-emoji> <b>User :</b> {message.from_user.mention}\n"
         f"📊 <b>Total Saved :</b> <code>{len(_playlist)} tracks</code>\n\n"
-        "<emoji id=5409132617750555920>⚡</emoji> Choose an option below to stream directly:</blockquote>"
+        "<tg-emoji emoji-id=\"5409132617750555920\">⚡</tg-emoji> Choose playback options or view your full playlist below:</blockquote>"
     )
     blocks = html_to_rich_blocks(caption)
 
+    blocks.append(
+        types.InputRichBlockButtons(
+            buttons=[
+                types.RichMessageButton(
+                    text="👁️ See Playlist",
+                    style=enums.ButtonStyle.DEFAULT,
+                    callback_data=f"see_plist|{user_id}",
+                ),
+                types.RichMessageButton(
+                    text="🔀 Shuffle",
+                    style=enums.ButtonStyle.PRIMARY,
+                    callback_data=f"stream_user_plist|a|{user_id}|shuffle",
+                ),
+            ]
+        )
+    )
     blocks.append(
         types.InputRichBlockButtons(
             buttons=[
@@ -226,12 +322,98 @@ async def check_playlist(client, message: Message, _):
     await deliver_rich(client, message.chat.id, blocks)
 
 
-# Stream Whole Playlist (Audio or Video) directly on tap
+# Open "See Playlist" list
+@app.on_callback_query(filters.regex(r"^see_plist\|") & ~BANNED_USERS)
+async def open_see_playlist_cb(client, CallbackQuery):
+    target_user_id = int(CallbackQuery.data.split("|")[1])
+    blocks_list, total_tracks, total_pages = await get_rich_see_page(target_user_id, page=0)
+    if total_tracks == 0:
+        return await CallbackQuery.answer("❌ Playlist is empty!", show_alert=True)
+
+    caption = (
+        "<blockquote><tg-emoji emoji-id=\"5895705279416241926\">🎵</tg-emoji> <u><b>SAVED PLAYLIST TRACKS</b></u></blockquote>\n\n"
+        "<blockquote expandable>"
+        f"Total tracks: <b>{total_tracks}</b>\n"
+        "Tap any track to play and continue from that track onwards.</blockquote>"
+    )
+    blocks = html_to_rich_blocks(caption)
+    blocks += blocks_list
+    await edit_rich(CallbackQuery.message, blocks)
+
+
+# Paginate "See Playlist" list
+@app.on_callback_query(filters.regex(r"^see_page\|") & ~BANNED_USERS)
+async def paginate_see_playlist_cb(client, CallbackQuery):
+    parts = CallbackQuery.data.split("|")
+    target_user_id = int(parts[1])
+    page = int(parts[2])
+
+    blocks_list, total_tracks, total_pages = await get_rich_see_page(target_user_id, page=page)
+    caption = (
+        "<blockquote><tg-emoji emoji-id=\"5895705279416241926\">🎵</tg-emoji> <u><b>SAVED PLAYLIST TRACKS</b></u></blockquote>\n\n"
+        "<blockquote expandable>"
+        f"Total tracks: <b>{total_tracks}</b>\n"
+        "Tap any track to play and continue from that track onwards.</blockquote>"
+    )
+    blocks = html_to_rich_blocks(caption)
+    blocks += blocks_list
+    await edit_rich(CallbackQuery.message, blocks)
+
+
+# Play from selected song and continue onward
+@app.on_callback_query(filters.regex(r"^play_from_here\|") & ~BANNED_USERS)
+async def play_from_here_callback(client, CallbackQuery):
+    parts = CallbackQuery.data.split("|")
+    target_user_id = int(parts[1])
+    selected_vid = parts[2]
+
+    notes = await _get_playlists(target_user_id)
+    if not notes:
+        return await CallbackQuery.answer("❌ Playlist is empty!", show_alert=True)
+
+    all_keys = [str(k).strip() for k in notes.keys()]
+    if selected_vid in all_keys:
+        start_index = all_keys.index(selected_vid)
+        result = all_keys[start_index:]
+    else:
+        result = all_keys
+
+    chat_id = CallbackQuery.message.chat.id
+    user_name = CallbackQuery.from_user.first_name or "User"
+
+    try:
+        await CallbackQuery.answer("▶️ Playing from selected track...", show_alert=False)
+        await CallbackQuery.message.delete()
+    except Exception:
+        pass
+
+    await _call_db_func(remove_active_video_chat, chat_id)
+    mystic = await client.send_message(chat_id, "🔄 **Fetching playlist & starting playback...**")
+
+    try:
+        _ = await _lang(chat_id)
+        await stream(
+            _,
+            mystic,
+            target_user_id,
+            result,
+            chat_id,
+            user_name,
+            chat_id,
+            video=None,
+            streamtype="playlist",
+        )
+    except Exception as e:
+        return await mystic.edit_text(f"❌ Error starting stream: {e}")
+
+
+# Stream Whole Playlist (Audio or Video or Shuffle)
 @app.on_callback_query(filters.regex(r"^stream_user_plist\|") & ~BANNED_USERS)
 async def stream_user_playlist_callback(client, CallbackQuery):
     parts = CallbackQuery.data.split("|")
     mode = parts[1]
     target_user_id = int(parts[2])
+    is_shuffle = len(parts) > 3 and parts[3] == "shuffle"
 
     notes = await _get_playlists(target_user_id)
     if not notes:
@@ -242,24 +424,21 @@ async def stream_user_playlist_callback(client, CallbackQuery):
 
     try:
         await CallbackQuery.answer("▶️ Starting Playlist Stream...", show_alert=False)
-    except Exception:
-        pass
-
-    try:
         await CallbackQuery.message.delete()
     except Exception:
         pass
 
-    # Ensure explicit video boolean and sync active video db state
     is_video = True if mode == "v" else None
     if is_video:
-        await add_active_video_chat(chat_id)
+        await _call_db_func(add_active_video_chat, chat_id)
     else:
-        await remove_active_video_chat(chat_id)
+        await _call_db_func(remove_active_video_chat, chat_id)
 
     mystic = await client.send_message(chat_id, "🔄 **Fetching playlist & starting stream...**")
 
     result = [str(k).strip() for k in notes.keys()]
+    if is_shuffle:
+        random.shuffle(result)
 
     try:
         _ = await _lang(chat_id)
@@ -287,10 +466,10 @@ async def del_plist_msg(client, message: Message, _):
         return await message.reply_text(_["playlist_3"])
 
     caption = (
-        "<blockquote><emoji id=5895705279416241926>🗑️</emoji> <u><b>MANAGE & REMOVE TRACKS</b></u></blockquote>\n\n"
+        "<blockquote><tg-emoji emoji-id=\"5895705279416241926\">🗑️</tg-emoji> <u><b>MANAGE & REMOVE TRACKS</b></u></blockquote>\n\n"
         "<blockquote expandable>"
         f"Total <b>{total_tracks}</b> tracks inside playlist.\n"
-        "Use ⬅️ / ➡️️ to switch pages and tap any song to delete.</blockquote>"
+        "Use ⬅️ / ➡️ to switch pages and tap any song to delete.</blockquote>"
     )
     blocks = html_to_rich_blocks(caption)
     blocks += del_blocks
@@ -303,12 +482,12 @@ async def paginate_del_playlist(client, CallbackQuery):
     user_id = CallbackQuery.from_user.id
     del_blocks, total_tracks, total_pages = await get_rich_del_page(user_id, page=page)
     if total_tracks == 0:
-        caption = "<blockquote><emoji id=5895705279416241926>✨</emoji> <b>Your playlist is empty.</b></blockquote>"
+        caption = "<blockquote><tg-emoji emoji-id=\"5895705279416241926\">✨</tg-emoji> <b>Your playlist is empty.</b></blockquote>"
         blocks = html_to_rich_blocks(caption)
         return await edit_rich(CallbackQuery.message, blocks)
 
     caption = (
-        "<blockquote><emoji id=5895705279416241926>🗑️</emoji> <u><b>MANAGE & REMOVE TRACKS</b></u></blockquote>\n\n"
+        "<blockquote><tg-emoji emoji-id=\"5895705279416241926\">🗑️</tg-emoji> <u><b>MANAGE & REMOVE TRACKS</b></u></blockquote>\n\n"
         "<blockquote expandable>"
         f"Total <b>{total_tracks}</b> tracks inside playlist.\n"
         "Use ⬅️ / ➡️ to switch pages and tap any song to delete.</blockquote>"
@@ -333,12 +512,12 @@ async def delete_single_track(client, CallbackQuery):
 
     del_blocks, total_tracks, total_pages = await get_rich_del_page(user_id, page=page)
     if total_tracks == 0:
-        caption = "<blockquote><emoji id=5895705279416241926>✨</emoji> <b>Your playlist is now empty.</b></blockquote>"
+        caption = "<blockquote><tg-emoji emoji-id=\"5895705279416241926\">✨</tg-emoji> <b>Your playlist is now empty.</b></blockquote>"
         blocks = html_to_rich_blocks(caption)
         return await edit_rich(CallbackQuery.message, blocks)
 
     caption = (
-        "<blockquote><emoji id=5895705279416241926>🗑️</emoji> <u><b>MANAGE & REMOVE TRACKS</b></u></blockquote>\n\n"
+        "<blockquote><tg-emoji emoji-id=\"5895705279416241926\">🗑️</tg-emoji> <u><b>MANAGE & REMOVE TRACKS</b></u></blockquote>\n\n"
         "<blockquote expandable>"
         f"Total <b>{total_tracks}</b> tracks inside playlist.\n"
         "Use ⬅️ / ➡️ to switch pages and tap any song to delete.</blockquote>"
@@ -351,17 +530,16 @@ async def delete_single_track(client, CallbackQuery):
 @app.on_callback_query(filters.regex(r"^open_autoplay_card\|") & ~BANNED_USERS)
 async def open_autoplay_modal(client, CallbackQuery):
     caption = (
-        "<blockquote><emoji id=5895705279416241926>🎲</emoji> <u><b>AUTOPLAY & MOOD CONFIG</b></u></blockquote>\n\n"
+        "<blockquote><tg-emoji emoji-id=\"5895705279416241926\">🎲</tg-emoji> <u><b>AUTOPLAY & MOOD CONFIG</b></u></blockquote>\n\n"
         "<blockquote expandable>"
-        "<emoji id=5974235702701853774>✨</emoji> Select preferred mood for automatic continuous streaming:\n"
-        "<emoji id=5409132617750555920>⚡</emoji> Bot streams related tracks when queue ends.</blockquote>"
+        "<tg-emoji emoji-id=\"5974235702701853774\">✨</tg-emoji> Select preferred mood for automatic continuous streaming:\n"
+        "<tg-emoji emoji-id=\"5409132617750555920\">⚡</tg-emoji> Bot streams related tracks when queue ends.</blockquote>"
     )
     blocks = rich_autoplay_mood_blocks(caption)
     await deliver_rich(client, CallbackQuery.message.chat.id, blocks)
     await CallbackQuery.answer()
 
 
-# Unified Add to Playlist Handler (works for both normal now-playing and autoplay button)
 @app.on_callback_query(filters.regex(r"^(add_playlist\||add_playlist_)") & ~BANNED_USERS)
 @languageCB
 async def add_current_playing_to_playlist(client, CallbackQuery, _):
@@ -450,14 +628,29 @@ async def add_playlist_cmd(client, message: Message, _):
         await m.delete()
 
         caption = (
-            "<blockquote><emoji id=5895705279416241926>✅</emoji> <u><b>ADDED TO PLAYLIST</b></u></blockquote>\n\n"
+            "<blockquote><tg-emoji emoji-id=\"5895705279416241926\">✅</tg-emoji> <u><b>ADDED TO PLAYLIST</b></u></blockquote>\n\n"
             "<blockquote expandable>"
             f"🎵 <b>Track :</b> <code>{title}</code>\n"
             f"⏱️ <b>Duration :</b> <code>{duration_min}</code>\n\n"
             "Use <code>/playlist</code> to view or <code>/play</code> in group!</blockquote>"
         )
         blocks = html_to_rich_blocks(caption)
-        blocks += get_playlist_markup(_)
+        blocks.append(
+            types.InputRichBlockButtons(
+                buttons=[
+                    types.RichMessageButton(
+                        text="👁️ See Playlist",
+                        style=enums.ButtonStyle.SUCCESS,
+                        callback_data=f"see_plist|{user_id}",
+                    ),
+                    types.RichMessageButton(
+                        text="✖ Close",
+                        style=enums.ButtonStyle.DANGER,
+                        callback_data="close",
+                    ),
+                ]
+            )
+        )
         await deliver_rich(client, message.chat.id, blocks)
     except Exception as e:
         await m.edit_text(f"Error: {e}")
@@ -471,7 +664,22 @@ async def delete_all_playlists(client, message, _):
     if _playlist:
         caption = "<blockquote>⚠ <b>Are you sure you want to delete entire playlist?</b></blockquote>"
         blocks = html_to_rich_blocks(caption)
-        blocks += warning_markup(_)
+        blocks.append(
+            types.InputRichBlockButtons(
+                buttons=[
+                    types.RichMessageButton(
+                        text="🗑️ Yes, Delete All",
+                        style=enums.ButtonStyle.DANGER,
+                        callback_data="delete_whole_playlist",
+                    ),
+                    types.RichMessageButton(
+                        text="✖ Cancel",
+                        style=enums.ButtonStyle.DEFAULT,
+                        callback_data="close",
+                    ),
+                ]
+            )
+        )
         await deliver_rich(client, message.chat.id, blocks)
     else:
         await message.reply_text(_["playlist_3"])
@@ -483,6 +691,37 @@ async def close_panel_cb(client, CallbackQuery):
         await CallbackQuery.message.delete()
     except Exception:
         pass
+
+
+@app.on_callback_query(filters.regex("close") & ~BANNED_USERS)
+async def close_cb(client, CallbackQuery):
+    try:
+        await CallbackQuery.message.delete()
+    except Exception:
+        pass
+
+
+@app.on_callback_query(filters.regex("delete_warning") & ~BANNED_USERS)
+async def del_warning_cb(client, CallbackQuery):
+    caption = "<blockquote>⚠ <b>Are you sure you want to delete entire playlist?</b></blockquote>"
+    blocks = html_to_rich_blocks(caption)
+    blocks.append(
+        types.InputRichBlockButtons(
+            buttons=[
+                types.RichMessageButton(
+                    text="🗑️ Yes, Delete All",
+                    style=enums.ButtonStyle.DANGER,
+                    callback_data="delete_whole_playlist",
+                ),
+                types.RichMessageButton(
+                    text="✖ Cancel",
+                    style=enums.ButtonStyle.DEFAULT,
+                    callback_data="close",
+                ),
+            ]
+        )
+    )
+    await edit_rich(CallbackQuery.message, blocks)
 
 
 @app.on_callback_query(filters.regex("delete_whole_playlist") & ~BANNED_USERS)
