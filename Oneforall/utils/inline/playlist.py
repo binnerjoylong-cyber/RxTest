@@ -6,8 +6,22 @@ def botplaylist_markup(_):
         types.InputRichBlockButtons(
             buttons=[
                 types.RichMessageButton(
-                    text=_["PL_B_1"],
+                    text="👁️ See Playlist",
                     style=enums.ButtonStyle.SUCCESS,
+                    callback_data="see_plist_self",
+                ),
+                types.RichMessageButton(
+                    text="🔀 Shuffle",
+                    style=enums.ButtonStyle.PRIMARY,
+                    callback_data="stream_plist_self|shuffle",
+                ),
+            ]
+        ),
+        types.InputRichBlockButtons(
+            buttons=[
+                types.RichMessageButton(
+                    text=_["PL_B_1"],
+                    style=enums.ButtonStyle.DEFAULT,
                     callback_data="get_playlist_playmode",
                 ),
             ]
@@ -29,13 +43,27 @@ def get_playlist_markup(_):
         types.InputRichBlockButtons(
             buttons=[
                 types.RichMessageButton(
-                    text=_["P_B_1"],
+                    text="👁️ See Playlist",
                     style=enums.ButtonStyle.SUCCESS,
+                    callback_data="see_plist_self",
+                ),
+                types.RichMessageButton(
+                    text="🔀 Shuffle",
+                    style=enums.ButtonStyle.PRIMARY,
+                    callback_data="stream_plist_self|shuffle",
+                ),
+            ]
+        ),
+        types.InputRichBlockButtons(
+            buttons=[
+                types.RichMessageButton(
+                    text=_["P_B_1"],
+                    style=enums.ButtonStyle.DEFAULT,
                     callback_data="play_playlist a",
                 ),
                 types.RichMessageButton(
                     text=_["P_B_2"],
-                    style=enums.ButtonStyle.PRIMARY,
+                    style=enums.ButtonStyle.DEFAULT,
                     callback_data="play_playlist v",
                 ),
             ]
