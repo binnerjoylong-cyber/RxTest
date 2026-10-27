@@ -8,7 +8,6 @@ from random import randint
 from time import time
 from typing import Dict, List, Union
 
-import requests
 from pyrogram import enums, filters, types
 from pyrogram.types import Message
 from youtube_search import YoutubeSearch
@@ -47,13 +46,16 @@ async def _lang(chat_id):
     return get_string(await get_lang(chat_id))
 
 
-async def _call_db_func(func, *args, **kwargs):
-    if inspect.iscoroutinefunction(func):
-        return await func(*args, **kwargs)
-    res = func(*args, **kwargs)
-    if inspect.isawaitable(res):
-        return await res
-    return res
+async def _safe_call(func, *args, **kwargs):
+    try:
+        if inspect.iscoroutinefunction(func):
+            return await func(*args, **kwargs)
+        res = func(*args, **kwargs)
+        if inspect.isawaitable(res):
+            return await res
+        return res
+    except Exception:
+        return None
 
 
 async def _get_playlists(chat_id: int) -> Dict[str, dict]:
@@ -268,11 +270,11 @@ async def check_playlist(client, message: Message, _):
         return await message.reply_text(_["playlist_3"])
 
     caption = (
-        "<blockquote><tg-emoji emoji-id=\"5895705279416241926\">📑</tg-emoji> <u><b>YOUR SAVED PLAYLIST</b></u></blockquote>\n\n"
+        "<blockquote><emoji id=5895705279416241926>📑</emoji> <u><b>YOUR SAVED PLAYLIST</b></u></blockquote>\n\n"
         "<blockquote expandable>"
-        f"<tg-emoji emoji-id=\"6066395745139824604\">👤</tg-emoji> <b>User :</b> {message.from_user.mention}\n"
+        f"<emoji id=6066395745139824604>👤</emoji> <b>User :</b> {message.from_user.mention}\n"
         f"📊 <b>Total Saved :</b> <code>{len(_playlist)} tracks</code>\n\n"
-        "<tg-emoji emoji-id=\"5409132617750555920\">⚡</tg-emoji> Choose playback options or view your full playlist below:</blockquote>"
+        "<emoji id=5409132617750555920>⚡</emoji> Choose playback options or view your full playlist below:</blockquote>"
     )
     blocks = html_to_rich_blocks(caption)
 
@@ -322,7 +324,6 @@ async def check_playlist(client, message: Message, _):
     await deliver_rich(client, message.chat.id, blocks)
 
 
-# Open "See Playlist" list
 @app.on_callback_query(filters.regex(r"^see_plist\|") & ~BANNED_USERS)
 async def open_see_playlist_cb(client, CallbackQuery):
     target_user_id = int(CallbackQuery.data.split("|")[1])
@@ -331,7 +332,7 @@ async def open_see_playlist_cb(client, CallbackQuery):
         return await CallbackQuery.answer("❌ Playlist is empty!", show_alert=True)
 
     caption = (
-        "<blockquote><tg-emoji emoji-id=\"5895705279416241926\">🎵</tg-emoji> <u><b>SAVED PLAYLIST TRACKS</b></u></blockquote>\n\n"
+        "<blockquote><emoji id=5895705279416241926>🎵</emoji> <u><b>SAVED PLAYLIST TRACKS</b></u></blockquote>\n\n"
         "<blockquote expandable>"
         f"Total tracks: <b>{total_tracks}</b>\n"
         "Tap any track to play and continue from that track onwards.</blockquote>"
@@ -341,7 +342,6 @@ async def open_see_playlist_cb(client, CallbackQuery):
     await edit_rich(CallbackQuery.message, blocks)
 
 
-# Paginate "See Playlist" list
 @app.on_callback_query(filters.regex(r"^see_page\|") & ~BANNED_USERS)
 async def paginate_see_playlist_cb(client, CallbackQuery):
     parts = CallbackQuery.data.split("|")
@@ -350,7 +350,7 @@ async def paginate_see_playlist_cb(client, CallbackQuery):
 
     blocks_list, total_tracks, total_pages = await get_rich_see_page(target_user_id, page=page)
     caption = (
-        "<blockquote><tg-emoji emoji-id=\"5895705279416241926\">🎵</tg-emoji> <u><b>SAVED PLAYLIST TRACKS</b></u></blockquote>\n\n"
+        "<blockquote><emoji id=5895705279416241926>🎵</emoji> <u><b>SAVED PLAYLIST TRACKS</b></u></blockquote>\n\n"
         "<blockquote expandable>"
         f"Total tracks: <b>{total_tracks}</b>\n"
         "Tap any track to play and continue from that track onwards.</blockquote>"
@@ -360,7 +360,6 @@ async def paginate_see_playlist_cb(client, CallbackQuery):
     await edit_rich(CallbackQuery.message, blocks)
 
 
-# Play from selected song and continue onward
 @app.on_callback_query(filters.regex(r"^play_from_here\|") & ~BANNED_USERS)
 async def play_from_here_callback(client, CallbackQuery):
     parts = CallbackQuery.data.split("|")
@@ -387,7 +386,7 @@ async def play_from_here_callback(client, CallbackQuery):
     except Exception:
         pass
 
-    await _call_db_func(remove_active_video_chat, chat_id)
+    await _safe_call(remove_active_video_chat, chat_id)
     mystic = await client.send_message(chat_id, "🔄 **Fetching playlist & starting playback...**")
 
     try:
@@ -407,7 +406,6 @@ async def play_from_here_callback(client, CallbackQuery):
         return await mystic.edit_text(f"❌ Error starting stream: {e}")
 
 
-# Stream Whole Playlist (Audio or Video or Shuffle)
 @app.on_callback_query(filters.regex(r"^stream_user_plist\|") & ~BANNED_USERS)
 async def stream_user_playlist_callback(client, CallbackQuery):
     parts = CallbackQuery.data.split("|")
@@ -430,9 +428,9 @@ async def stream_user_playlist_callback(client, CallbackQuery):
 
     is_video = True if mode == "v" else None
     if is_video:
-        await _call_db_func(add_active_video_chat, chat_id)
+        await _safe_call(add_active_video_chat, chat_id)
     else:
-        await _call_db_func(remove_active_video_chat, chat_id)
+        await _safe_call(remove_active_video_chat, chat_id)
 
     mystic = await client.send_message(chat_id, "🔄 **Fetching playlist & starting stream...**")
 
@@ -466,7 +464,7 @@ async def del_plist_msg(client, message: Message, _):
         return await message.reply_text(_["playlist_3"])
 
     caption = (
-        "<blockquote><tg-emoji emoji-id=\"5895705279416241926\">🗑️</tg-emoji> <u><b>MANAGE & REMOVE TRACKS</b></u></blockquote>\n\n"
+        "<blockquote><emoji id=5895705279416241926>🗑️</emoji> <u><b>MANAGE & REMOVE TRACKS</b></u></blockquote>\n\n"
         "<blockquote expandable>"
         f"Total <b>{total_tracks}</b> tracks inside playlist.\n"
         "Use ⬅️ / ➡️ to switch pages and tap any song to delete.</blockquote>"
@@ -482,12 +480,12 @@ async def paginate_del_playlist(client, CallbackQuery):
     user_id = CallbackQuery.from_user.id
     del_blocks, total_tracks, total_pages = await get_rich_del_page(user_id, page=page)
     if total_tracks == 0:
-        caption = "<blockquote><tg-emoji emoji-id=\"5895705279416241926\">✨</tg-emoji> <b>Your playlist is empty.</b></blockquote>"
+        caption = "<blockquote><emoji id=5895705279416241926>✨</emoji> <b>Your playlist is empty.</b></blockquote>"
         blocks = html_to_rich_blocks(caption)
         return await edit_rich(CallbackQuery.message, blocks)
 
     caption = (
-        "<blockquote><tg-emoji emoji-id=\"5895705279416241926\">🗑️</tg-emoji> <u><b>MANAGE & REMOVE TRACKS</b></u></blockquote>\n\n"
+        "<blockquote><emoji id=5895705279416241926>🗑️</emoji> <u><b>MANAGE & REMOVE TRACKS</b></u></blockquote>\n\n"
         "<blockquote expandable>"
         f"Total <b>{total_tracks}</b> tracks inside playlist.\n"
         "Use ⬅️ / ➡️ to switch pages and tap any song to delete.</blockquote>"
@@ -512,12 +510,12 @@ async def delete_single_track(client, CallbackQuery):
 
     del_blocks, total_tracks, total_pages = await get_rich_del_page(user_id, page=page)
     if total_tracks == 0:
-        caption = "<blockquote><tg-emoji emoji-id=\"5895705279416241926\">✨</tg-emoji> <b>Your playlist is now empty.</b></blockquote>"
+        caption = "<blockquote><emoji id=5895705279416241926>✨</emoji> <b>Your playlist is now empty.</b></blockquote>"
         blocks = html_to_rich_blocks(caption)
         return await edit_rich(CallbackQuery.message, blocks)
 
     caption = (
-        "<blockquote><tg-emoji emoji-id=\"5895705279416241926\">🗑️</tg-emoji> <u><b>MANAGE & REMOVE TRACKS</b></u></blockquote>\n\n"
+        "<blockquote><emoji id=5895705279416241926>🗑️</emoji> <u><b>MANAGE & REMOVE TRACKS</b></u></blockquote>\n\n"
         "<blockquote expandable>"
         f"Total <b>{total_tracks}</b> tracks inside playlist.\n"
         "Use ⬅️ / ➡️ to switch pages and tap any song to delete.</blockquote>"
@@ -530,10 +528,10 @@ async def delete_single_track(client, CallbackQuery):
 @app.on_callback_query(filters.regex(r"^open_autoplay_card\|") & ~BANNED_USERS)
 async def open_autoplay_modal(client, CallbackQuery):
     caption = (
-        "<blockquote><tg-emoji emoji-id=\"5895705279416241926\">🎲</tg-emoji> <u><b>AUTOPLAY & MOOD CONFIG</b></u></blockquote>\n\n"
+        "<blockquote><emoji id=5895705279416241926>🎲</emoji> <u><b>AUTOPLAY & MOOD CONFIG</b></u></blockquote>\n\n"
         "<blockquote expandable>"
-        "<tg-emoji emoji-id=\"5974235702701853774\">✨</tg-emoji> Select preferred mood for automatic continuous streaming:\n"
-        "<tg-emoji emoji-id=\"5409132617750555920\">⚡</tg-emoji> Bot streams related tracks when queue ends.</blockquote>"
+        "<emoji id=5974235702701853774>✨</emoji> Select preferred mood for automatic continuous streaming:\n"
+        "<emoji id=5409132617750555920>⚡</emoji> Bot streams related tracks when queue ends.</blockquote>"
     )
     blocks = rich_autoplay_mood_blocks(caption)
     await deliver_rich(client, CallbackQuery.message.chat.id, blocks)
@@ -554,8 +552,10 @@ async def add_current_playing_to_playlist(client, CallbackQuery, _):
         clean_vid = raw_data.replace("add_playlist_", "").strip()
         try:
             from Oneforall import YouTube
-            title, duration, _, _, _ = await YouTube.details(clean_vid, True)
-            title = title[:50].title()
+            res = await _safe_call(YouTube.details, clean_vid, True)
+            if res and isinstance(res, (list, tuple)):
+                title = res[0][:50].title()
+                duration = res[1]
         except Exception:
             pass
     else:
@@ -617,8 +617,14 @@ async def add_playlist_cmd(client, message: Message, _):
             return await m.edit_text("❌ No tracks found.")
 
         videoid = results[0]["id"]
-        title, duration_min, _, _, _ = await YouTube.details(videoid, True)
-        title = (title[:50]).title()
+        title = results[0].get("title", query)[:50].title()
+        duration_min = results[0].get("duration", "03:30")
+
+        yt_res = await _safe_call(YouTube.details, videoid, True)
+        if yt_res and isinstance(yt_res, (list, tuple)):
+            title = str(yt_res[0])[:50].title()
+            duration_min = str(yt_res[1])
+
         plist = {
             "videoid": videoid,
             "title": title,
@@ -628,7 +634,7 @@ async def add_playlist_cmd(client, message: Message, _):
         await m.delete()
 
         caption = (
-            "<blockquote><tg-emoji emoji-id=\"5895705279416241926\">✅</tg-emoji> <u><b>ADDED TO PLAYLIST</b></u></blockquote>\n\n"
+            "<blockquote><emoji id=5895705279416241926>✅</emoji> <u><b>ADDED TO PLAYLIST</b></u></blockquote>\n\n"
             "<blockquote expandable>"
             f"🎵 <b>Track :</b> <code>{title}</code>\n"
             f"⏱️ <b>Duration :</b> <code>{duration_min}</code>\n\n"
