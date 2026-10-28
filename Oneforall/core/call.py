@@ -46,17 +46,20 @@ last_played_cache = {}
 suggestion_cache = {}
 loop = asyncio.get_event_loop_policy().get_event_loop()
 
+# Infinite Random Vibe Pools (Pure diverse songs)
 DIVERSE_POOLS = [
-    "Trending Hindi Hit Songs",
-    "Latest Bollywood Romantic Songs",
-    "Punjabi Pop Hits Mix",
-    "Arijit Singh Top Tracks",
+    "Latest Hindi Romantic Songs 2024",
+    "Top Bollywood Hits Mix",
+    "Punjabi Hit Songs Jukebox",
+    "Arijit Singh Best Songs",
     "Sidhu Moosewala Viral Mix",
-    "Lo-Fi Hindi Chill Vibes",
-    "Haryanvi Top Hits",
-    "Retro Bollywood Evergreen",
-    "Coke Studio Bharat Hits",
-    "Indie Hindi Chill Playlist",
+    "Lo-Fi Chill Bollywood Mashup",
+    "Trending Indian Pop Hits",
+    "Retro Bollywood 90s Evergreen",
+    "Coke Studio Best Hits",
+    "Haryanvi Top Songs 2024",
+    "Atif Aslam Hit Playlist",
+    "Trending Reels Viral Songs",
 ]
 
 
@@ -68,7 +71,7 @@ async def _clear_(chat_id):
 
 def _clean_track_title(raw_title: str) -> str:
     cleaned = re.sub(
-        r"[\(\[].*?[\)\]]|official|video|audio|remix|lyrics|full song|feat\..*|ft\..*|prod\..*",
+        r"[\(\[].*?[\)\]]|official|video|audio|remix|lyrics|full song|feat\..*|ft\..*|prod\..*|slowed|reverb|loop|mashup|status",
         "",
         str(raw_title),
         flags=re.IGNORECASE,
@@ -76,17 +79,51 @@ def _clean_track_title(raw_title: str) -> str:
     return cleaned if cleaned else str(raw_title).strip()
 
 
-def build_suggestion_blocks(query: str, tracks: list, page: int = 0):
+async def fetch_random_diverse_tracks(exclude_query: str = "") -> list:
+    chosen_pools = random.sample(DIVERSE_POOLS, k=2)
+    all_fetched = []
+    for p in chosen_pools:
+        try:
+            res = YoutubeSearch(p, max_results=20).to_dict()
+            if res:
+                all_fetched.extend(res)
+        except Exception:
+            pass
+
+    exclude_words = set(re.findall(r"\w+", exclude_query.lower())) if exclude_query else set()
+
+    seen_titles = set()
+    cleaned_tracks = []
+    for track in all_fetched:
+        raw_t = track.get("title", "")
+        cleaned_t = _clean_track_title(raw_t)[:18].lower()
+        if not cleaned_t:
+            continue
+
+        # Check if the title repeats or matches the same ended track
+        track_words = set(re.findall(r"\w+", cleaned_t))
+        if exclude_words and len(track_words.intersection(exclude_words)) >= 2:
+            continue
+
+        if cleaned_t not in seen_titles:
+            seen_titles.add(cleaned_t)
+            cleaned_tracks.append(track)
+
+    random.shuffle(cleaned_tracks)
+    return cleaned_tracks
+
+
+def build_suggestion_blocks(tracks: list, page: int = 0):
     start = (page * 5) % max(len(tracks), 1)
     batch = tracks[start : start + 5]
     if len(batch) < 5 and len(tracks) >= 5:
         batch = tracks[:5]
 
     caption = (
-        "<blockquote><emoji id=5895705279416241926>🎶</emoji> <u><b>QUEUE ENDED. HERE ARE SOME SUGGESTIONS...</b></u></blockquote>\n\n"
+        "<blockquote>🎶 <u><b>QUEUE ENDED. HERE ARE SOME SUGGESTIONS...</b></u></blockquote>\n\n"
         "<blockquote expandable>"
-        "<emoji id=5974235702701853774>✨</emoji> Select any track below to start streaming directly.\n"
-        "<emoji id=5409132617750555920>🔄</emoji> Tap <b>Load More</b> to fetch infinite new recommendations.</blockquote>"
+        "✨ Select any track below to start streaming directly.\n"
+        "🔄 Tap <b>Load More</b> to fetch infinite new recommendations.</blockquote>"
     )
     blocks = html_to_rich_blocks(caption)
 
@@ -112,14 +149,13 @@ def build_suggestion_blocks(query: str, tracks: list, page: int = 0):
             )
         )
 
-    clean_query = _clean_track_title(query).replace("|", " ").strip()[:18]
     blocks.append(
         types.InputRichBlockButtons(
             buttons=[
                 types.RichMessageButton(
                     text="🔄 Load More",
                     style=enums.ButtonStyle.PRIMARY,
-                    callback_data=f"suggest_more|{clean_query}|{page + 1}",
+                    callback_data=f"suggest_more|{page + 1}",
                 ),
                 types.RichMessageButton(
                     text="✖ Close",
@@ -134,27 +170,9 @@ def build_suggestion_blocks(query: str, tracks: list, page: int = 0):
 
 async def send_queue_end_suggestions(chat_id: int, last_title: str = None):
     try:
-        results = []
-        if last_title:
-            cleaned = _clean_track_title(last_title)
-            results = YoutubeSearch(f"{cleaned} song mix recommendations", max_results=30).to_dict()
-
-        if not results or len(results) < 5:
-            fallback_query = random.choice(DIVERSE_POOLS)
-            results = YoutubeSearch(fallback_query, max_results=30).to_dict()
-
-        seen_titles = set()
-        unique_tracks = []
-        for r in results:
-            short_t = _clean_track_title(r.get("title", ""))[:15].lower()
-            if short_t not in seen_titles:
-                seen_titles.add(short_t)
-                unique_tracks.append(r)
-
-        random.shuffle(unique_tracks)
+        unique_tracks = await fetch_random_diverse_tracks(exclude_query=last_title or "")
         suggestion_cache[chat_id] = unique_tracks
-        base_query = last_title or "Hindi Hit Songs"
-        blocks = build_suggestion_blocks(base_query, unique_tracks, page=0)
+        blocks = build_suggestion_blocks(unique_tracks, page=0)
         await deliver_rich(app, chat_id, blocks)
     except Exception as e:
         LOGGER(__name__).error(f"Error sending suggestions: {e}")
@@ -501,7 +519,7 @@ class Call(PyTgCalls):
                                 pass
 
                         caption = (
-                            "<blockquote><emoji id=5895705279416241926>🎲</emoji> <u><b>AUTOPLAY STREAMING</b></u></blockquote>\n\n"
+                            "<blockquote>🎲 <u><b>AUTOPLAY STREAMING</b></u></blockquote>\n\n"
                             "<blockquote expandable>"
                             f"🎵 <b>Track:</b> {title[:40]}\n"
                             f"⏱️ <b>Duration:</b> {duration}\n"
