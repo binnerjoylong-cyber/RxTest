@@ -48,16 +48,16 @@ loop = asyncio.get_event_loop_policy().get_event_loop()
 
 # Infinite Random Vibe Pools (Pure diverse songs)
 DIVERSE_POOLS = [
-    "Latest Hindi Romantic Songs 2024",
-    "Top Bollywood Hits Mix",
-    "Punjabi Hit Songs Jukebox",
+    "Trending Hindi Hit Songs",
+    "Latest Bollywood Romantic Songs",
+    "Punjabi Pop Hits Mix",
     "Arijit Singh Best Songs",
     "Sidhu Moosewala Viral Mix",
     "Lo-Fi Chill Bollywood Mashup",
     "Trending Indian Pop Hits",
     "Retro Bollywood 90s Evergreen",
     "Coke Studio Best Hits",
-    "Haryanvi Top Songs 2024",
+    "Haryanvi Top Songs",
     "Atif Aslam Hit Playlist",
     "Trending Reels Viral Songs",
 ]
@@ -100,7 +100,6 @@ async def fetch_random_diverse_tracks(exclude_query: str = "") -> list:
         if not cleaned_t:
             continue
 
-        # Check if the title repeats or matches the same ended track
         track_words = set(re.findall(r"\w+", cleaned_t))
         if exclude_words and len(track_words.intersection(exclude_words)) >= 2:
             continue
@@ -120,10 +119,10 @@ def build_suggestion_blocks(tracks: list, page: int = 0):
         batch = tracks[:5]
 
     caption = (
-        "<blockquote>🎶 <u><b>QUEUE ENDED. HERE ARE SOME SUGGESTIONS...</b></u></blockquote>\n\n"
+        "<blockquote><emoji id=5895705279416241926>🎶</emoji> <u><b>QUEUE ENDED. HERE ARE SOME SUGGESTIONS...</b></u></blockquote>\n\n"
         "<blockquote expandable>"
-        "✨ Select any track below to start streaming directly.\n"
-        "🔄 Tap <b>Load More</b> to fetch infinite new recommendations.</blockquote>"
+        "<emoji id=5974235702701853774>✨</emoji> Select any track below to start streaming directly.\n"
+        "<emoji id=5409132617750555920>🔄</emoji> Tap <b>Load More</b> to fetch infinite new recommendations.</blockquote>"
     )
     blocks = html_to_rich_blocks(caption)
 
@@ -519,7 +518,7 @@ class Call(PyTgCalls):
                                 pass
 
                         caption = (
-                            "<blockquote>🎲 <u><b>AUTOPLAY STREAMING</b></u></blockquote>\n\n"
+                            "<blockquote><emoji id=5895705279416241926>🎲</emoji> <u><b>AUTOPLAY STREAMING</b></u></blockquote>\n\n"
                             "<blockquote expandable>"
                             f"🎵 <b>Track:</b> {title[:40]}\n"
                             f"⏱️ <b>Duration:</b> {duration}\n"
