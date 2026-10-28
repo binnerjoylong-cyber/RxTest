@@ -1,16 +1,22 @@
+import inspect
+import math
 import random
 import string
+from typing import Dict, List, Union
 
-from pyrogram import filters
+from pyrogram import enums, filters, types
 from pyrogram.types import Message
 from pytgcalls.exceptions import NoActiveGroupCall
+from youtube_search import YoutubeSearch
 
 import config
 from config import BANNED_USERS, lyrical
 from Oneforall import Apple, Resso, SoundCloud, Spotify, Telegram, YouTube, app
-from Oneforall.core.call import Hotty
+from Oneforall.core.call import Hotty, build_suggestion_blocks, suggestion_cache
+from Oneforall.core.mongo import mongodb
 from Oneforall.utils import seconds_to_min, time_to_seconds
 from Oneforall.utils.channelplay import get_channeplayCB
+from Oneforall.utils.database import add_active_video_chat, remove_active_video_chat
 from Oneforall.utils.decorators.language import languageCB
 from Oneforall.utils.decorators.play import PlayWrapper
 from Oneforall.utils.formatters import formats
@@ -21,9 +27,117 @@ from Oneforall.utils.inline import (
     slider_markup,
     track_markup,
 )
-from Oneforall.utils.inline.rich import caption_blocks, deliver_rich
+from Oneforall.utils.inline.rich import (
+    caption_blocks,
+    deliver_rich,
+    edit_rich,
+    html_to_rich_blocks,
+)
 from Oneforall.utils.logger import play_logs
 from Oneforall.utils.stream.stream import stream
+
+playlistdb = mongodb.playlist
+PAGE_SIZE = 7
+
+
+async def _call_db_func(func, *args, **kwargs):
+    if inspect.iscoroutinefunction(func):
+        return await func(*args, **kwargs)
+    res = func(*args, **kwargs)
+    if inspect.isawaitable(res):
+        return await res
+    return res
+
+
+async def _get_playlists(chat_id: int) -> Dict[str, dict]:
+    _notes = await playlistdb.find_one({"chat_id": chat_id})
+    if not _notes:
+        return {}
+    return _notes.get("notes", {})
+
+
+async def get_playlist_names(chat_id: int) -> List[str]:
+    notes = await _get_playlists(chat_id)
+    return list(notes.keys())
+
+
+async def get_playlist(chat_id: int, name: str) -> Union[bool, dict]:
+    _notes = await _get_playlists(chat_id)
+    return _notes.get(name, False)
+
+
+async def get_rich_see_page(user_id: int, page: int = 0):
+    all_tracks = await get_playlist_names(user_id)
+    total_tracks = len(all_tracks)
+    if total_tracks == 0:
+        return [], 0, 0
+
+    total_pages = math.ceil(total_tracks / PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+
+    start = page * PAGE_SIZE
+    end = start + PAGE_SIZE
+    current_batch = all_tracks[start:end]
+
+    blocks = []
+    for idx, x in enumerate(current_batch, start=start + 1):
+        _note = await get_playlist(user_id, x)
+        title = _note["title"].title() if (_note and isinstance(_note, dict) and "title" in _note) else str(x)
+        blocks.append(
+            types.InputRichBlockButtons(
+                buttons=[
+                    types.RichMessageButton(
+                        text=f"▶️ {idx}. {title[:28]}",
+                        style=enums.ButtonStyle.SUCCESS,
+                        callback_data=f"play_from_here|{user_id}|{x}",
+                    )
+                ]
+            )
+        )
+
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(
+            types.RichMessageButton(
+                text="⬅️ Back",
+                style=enums.ButtonStyle.DEFAULT,
+                callback_data=f"see_page|{user_id}|{page - 1}",
+            )
+        )
+    nav_buttons.append(
+        types.RichMessageButton(
+            text=f"📄 {page + 1}/{total_pages}",
+            style=enums.ButtonStyle.DEFAULT,
+            callback_data="see_page_indicator",
+        )
+    )
+    if page < total_pages - 1:
+        nav_buttons.append(
+            types.RichMessageButton(
+                text="Next ➡️",
+                style=enums.ButtonStyle.DEFAULT,
+                callback_data=f"see_page|{user_id}|{page + 1}",
+            )
+        )
+    blocks.append(types.InputRichBlockButtons(buttons=nav_buttons))
+
+    blocks.append(
+        types.InputRichBlockButtons(
+            buttons=[
+                types.RichMessageButton(
+                    text="🔀 Shuffle",
+                    style=enums.ButtonStyle.PRIMARY,
+                    callback_data=f"stream_user_plist|a|{user_id}|shuffle",
+                ),
+                types.RichMessageButton(
+                    text="✖ Close",
+                    style=enums.ButtonStyle.DANGER,
+                    callback_data="close",
+                ),
+            ]
+        )
+    )
+    return blocks, total_tracks, total_pages
 
 
 async def send_rich_block(chat_id: int, text: str, rich_buttons: list = None, img_url: str = None):
@@ -451,6 +565,139 @@ async def play_commnd(
                     pass
                 await send_rich_block(message.chat.id, cap, buttons, img_url=img)
                 return await play_logs(message, streamtype="URL Searched Inline")
+
+
+# Callback Handler for "See Playlist" inside /play menu
+@app.on_callback_query(filters.regex("see_plist_self") & ~BANNED_USERS)
+async def see_plist_self_cb(client, CallbackQuery):
+    user_id = CallbackQuery.from_user.id
+    blocks_list, total_tracks, total_pages = await get_rich_see_page(user_id, page=0)
+    if total_tracks == 0:
+        return await CallbackQuery.answer("❌ Your playlist is empty!", show_alert=True)
+
+    caption = (
+        "<blockquote><emoji id=5895705279416241926>🎵</emoji> <u><b>SAVED PLAYLIST TRACKS</b></u></blockquote>\n\n"
+        "<blockquote expandable>"
+        f"Total tracks: <b>{total_tracks}</b>\n"
+        "Tap any track to play and continue from that track onwards.</blockquote>"
+    )
+    blocks = html_to_rich_blocks(caption)
+    blocks += blocks_list
+    await edit_rich(CallbackQuery.message, blocks)
+
+
+# Callback Handler for "Shuffle" inside /play menu
+@app.on_callback_query(filters.regex(r"^stream_plist_self\|shuffle") & ~BANNED_USERS)
+async def stream_plist_self_shuffle_cb(client, CallbackQuery):
+    user_id = CallbackQuery.from_user.id
+    notes = await _get_playlists(user_id)
+    if not notes:
+        return await CallbackQuery.answer("❌ Playlist is empty!", show_alert=True)
+
+    chat_id = CallbackQuery.message.chat.id
+    user_name = CallbackQuery.from_user.first_name or "User"
+
+    try:
+        await CallbackQuery.answer("🔀 Shuffling and starting stream...", show_alert=False)
+        await CallbackQuery.message.delete()
+    except Exception:
+        pass
+
+    await _call_db_func(remove_active_video_chat, chat_id)
+    mystic = await client.send_message(chat_id, "🔄 **Fetching playlist & shuffling tracks...**")
+
+    result = [str(k).strip() for k in notes.keys()]
+    random.shuffle(result)
+
+    try:
+        from Oneforall.utils.database import get_lang
+        from strings import get_string
+        _ = get_string(await get_lang(chat_id))
+        await stream(
+            _,
+            mystic,
+            user_id,
+            result,
+            chat_id,
+            user_name,
+            chat_id,
+            video=None,
+            streamtype="playlist",
+        )
+    except Exception as e:
+        return await mystic.edit_text(f"❌ Error starting stream: {e}")
+
+
+# Handle "Load More" infinite suggestion pagination (Replaces previous page)
+@app.on_callback_query(filters.regex(r"^suggest_more\|") & ~BANNED_USERS)
+async def suggest_more_pagination(client, CallbackQuery):
+    parts = CallbackQuery.data.split("|")
+    query = parts[1]
+    page = int(parts[2])
+    chat_id = CallbackQuery.message.chat.id
+
+    cached = suggestion_cache.get(chat_id)
+    if not cached or (page * 5) >= len(cached):
+        fresh = YoutubeSearch(f"{query} song mix", max_results=30).to_dict()
+        if fresh:
+            if cached:
+                cached.extend(fresh)
+            else:
+                cached = fresh
+            suggestion_cache[chat_id] = cached
+
+    if not cached:
+        return await CallbackQuery.answer("❌ No more suggestions found!", show_alert=True)
+
+    try:
+        await CallbackQuery.answer("🔄 Loading more songs...", show_alert=False)
+    except Exception:
+        pass
+
+    blocks = build_suggestion_blocks(query, cached, page=page)
+    await edit_rich(CallbackQuery.message, blocks)
+
+
+# Direct Play from Suggestion Button (Auto joins VC even if assistant is not in VC)
+@app.on_callback_query(filters.regex(r"^suggest_play\|") & ~BANNED_USERS)
+async def suggest_play_callback(client, CallbackQuery):
+    vidid = CallbackQuery.data.split("|")[1]
+    chat_id = CallbackQuery.message.chat.id
+    user_id = CallbackQuery.from_user.id
+    user_name = CallbackQuery.from_user.first_name
+
+    try:
+        await CallbackQuery.answer("▶️ Playing suggestion...", show_alert=False)
+        await CallbackQuery.message.delete()
+    except Exception:
+        pass
+
+    mystic = await client.send_message(chat_id, "🔄 **Fetching track & starting stream...**")
+
+    try:
+        details, track_id = await YouTube.track(vidid, True)
+    except Exception as e:
+        return await mystic.edit_text(f"❌ Error: {e}")
+
+    try:
+        from Oneforall.utils.database import get_lang
+        from strings import get_string
+        _ = get_string(await get_lang(chat_id))
+
+        await stream(
+            _,
+            mystic,
+            user_id,
+            details,
+            chat_id,
+            user_name,
+            chat_id,
+            video=None,
+            streamtype="youtube",
+            forceplay=None,
+        )
+    except Exception as e:
+        return await mystic.edit_text(f"❌ Playback error: {e}")
 
 
 @app.on_callback_query(filters.regex("MusicStream") & ~BANNED_USERS)
