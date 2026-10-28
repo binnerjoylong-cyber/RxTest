@@ -4,11 +4,12 @@ from datetime import datetime, timedelta
 from typing import Union
 
 from ntgcalls import TelegramServerError
-from pyrogram import Client
+from pyrogram import Client, enums, types
 from pytgcalls import PyTgCalls
 from pytgcalls.exceptions import AlreadyJoinedError, NoActiveGroupCall
 from pytgcalls.types import AudioQuality, MediaStream, Update, VideoQuality
 from pytgcalls.types.stream import StreamAudioEnded
+from youtube_search import YoutubeSearch
 
 import config
 from Oneforall import LOGGER, YouTube, app
@@ -27,13 +28,20 @@ from Oneforall.utils.database import (
 )
 from Oneforall.utils.exceptions import AssistantErr
 from Oneforall.utils.formatters import check_duration, seconds_to_min, speed_converter
-from Oneforall.utils.inline.rich import send_now_playing_rich
+from Oneforall.utils.inline.rich import (
+    deliver_rich,
+    edit_rich,
+    html_to_rich_blocks,
+    send_now_playing_rich,
+)
 from Oneforall.utils.stream.autoclear import auto_clean
 from Oneforall.utils.thumbnails import get_thumb
 from strings import get_string
 
 autoend = {}
 counter = {}
+last_played_cache = {}
+suggestion_cache = {}
 loop = asyncio.get_event_loop_policy().get_event_loop()
 
 
@@ -41,6 +49,78 @@ async def _clear_(chat_id):
     db[chat_id] = []
     await remove_active_video_chat(chat_id)
     await remove_active_chat(chat_id)
+
+
+def build_suggestion_blocks(query: str, tracks: list, page: int = 0):
+    start = (page * 5) % len(tracks)
+    batch = tracks[start : start + 5]
+    if len(batch) < 5 and len(tracks) >= 5:
+        batch = tracks[:5]
+
+    caption = (
+        "<blockquote><emoji id=5895705279416241926>🎶</emoji> <u><b>QUEUE ENDED. HERE ARE SOME SUGGESTIONS...</b></u></blockquote>\n\n"
+        "<blockquote expandable>"
+        "✨ Select any track below to start streaming directly.\n"
+        "🔄 Tap <b>Load More</b> to fetch infinite new recommendations.</blockquote>"
+    )
+    blocks = html_to_rich_blocks(caption)
+
+    styles = [
+        enums.ButtonStyle.SUCCESS,
+        enums.ButtonStyle.PRIMARY,
+        enums.ButtonStyle.DANGER,
+    ]
+
+    for idx, t in enumerate(batch):
+        vid = t.get("id")
+        title = t.get("title", "Track")[:28]
+        btn_style = styles[idx % len(styles)]
+        blocks.append(
+            types.InputRichBlockButtons(
+                buttons=[
+                    types.RichMessageButton(
+                        text=f"▶️ {title}",
+                        style=btn_style,
+                        callback_data=f"suggest_play|{vid}",
+                    )
+                ]
+            )
+        )
+
+    clean_query = query.replace("|", " ").strip()[:18]
+    blocks.append(
+        types.InputRichBlockButtons(
+            buttons=[
+                types.RichMessageButton(
+                    text="🔄 Load More",
+                    style=enums.ButtonStyle.PRIMARY,
+                    callback_data=f"suggest_more|{clean_query}|{page + 1}",
+                ),
+                types.RichMessageButton(
+                    text="✖ Close",
+                    style=enums.ButtonStyle.DANGER,
+                    callback_data="close",
+                ),
+            ]
+        )
+    )
+    return blocks
+
+
+async def send_queue_end_suggestions(chat_id: int, last_title: str = None):
+    try:
+        search_query = last_title or "Hindi Hit Songs"
+        results = YoutubeSearch(search_query, max_results=30).to_dict()
+        if not results:
+            results = YoutubeSearch("Trending Bollywood Songs", max_results=30).to_dict()
+        if not results:
+            return
+
+        suggestion_cache[chat_id] = results
+        blocks = build_suggestion_blocks(search_query, results, page=0)
+        await deliver_rich(app, chat_id, blocks)
+    except Exception as e:
+        LOGGER(__name__).error(f"Error sending suggestions: {e}")
 
 
 class Call(PyTgCalls):
@@ -332,8 +412,13 @@ class Call(PyTgCalls):
     async def change_stream(self, client, chat_id):
         check = db.get(chat_id)
         if not check:
+            last_title = last_played_cache.get(chat_id)
             await _clear_(chat_id)
-            return await client.leave_group_call(chat_id)
+            try:
+                await client.leave_group_call(chat_id)
+            except Exception:
+                pass
+            return await send_queue_end_suggestions(chat_id, last_title)
 
         popped = None
         loop_cnt = await get_loop(chat_id)
@@ -345,21 +430,17 @@ class Call(PyTgCalls):
                 await set_loop(chat_id, loop_cnt)
 
             if popped:
+                last_played_cache[chat_id] = popped.get("title", "")
                 try:
                     await auto_clean(popped)
                 except Exception:
                     pass
 
             if not check:
-                from pyrogram import enums, types
                 from Oneforall.plugins.misc.autoplay import (
                     get_autoplay_mood,
                     get_autoplay_recommendation,
                     is_autoplay_on,
-                )
-                from Oneforall.utils.inline.rich import (
-                    deliver_rich,
-                    html_to_rich_blocks,
                 )
 
                 if await is_autoplay_on(chat_id):
@@ -432,20 +513,40 @@ class Call(PyTgCalls):
                         ]
                         check = db.get(chat_id)
                     else:
+                        last_title = last_played_cache.get(chat_id)
                         await _clear_(chat_id)
-                        return await client.leave_group_call(chat_id)
+                        try:
+                            await client.leave_group_call(chat_id)
+                        except Exception:
+                            pass
+                        return await send_queue_end_suggestions(chat_id, last_title)
                 else:
+                    last_title = last_played_cache.get(chat_id)
                     await _clear_(chat_id)
-                    return await client.leave_group_call(chat_id)
+                    try:
+                        await client.leave_group_call(chat_id)
+                    except Exception:
+                        pass
+                    return await send_queue_end_suggestions(chat_id, last_title)
 
         except Exception as e:
             LOGGER(__name__).error(f"Stream end exception: {e}")
+            last_title = last_played_cache.get(chat_id)
             await _clear_(chat_id)
-            return await client.leave_group_call(chat_id)
+            try:
+                await client.leave_group_call(chat_id)
+            except Exception:
+                pass
+            return await send_queue_end_suggestions(chat_id, last_title)
 
         if not check:
+            last_title = last_played_cache.get(chat_id)
             await _clear_(chat_id)
-            return await client.leave_group_call(chat_id)
+            try:
+                await client.leave_group_call(chat_id)
+            except Exception:
+                pass
+            return await send_queue_end_suggestions(chat_id, last_title)
 
         queued = check[0]["file"]
         language = await get_lang(chat_id)
