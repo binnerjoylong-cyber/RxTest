@@ -18,6 +18,7 @@ from Oneforall.core.call import (
     Hotty,
     _clean_track_title,
     build_suggestion_blocks,
+    fetch_random_diverse_tracks,
     suggestion_cache,
 )
 from Oneforall.core.mongo import mongodb
@@ -583,7 +584,7 @@ async def see_plist_self_cb(client, CallbackQuery):
         return await CallbackQuery.answer("❌ Your playlist is empty!", show_alert=True)
 
     caption = (
-        "<blockquote><tg-emoji emoji-id=\"5895705279416241926\">🎵</tg-emoji> <u><b>SAVED PLAYLIST TRACKS</b></u></blockquote>\n\n"
+        "<blockquote>🎵 <u><b>SAVED PLAYLIST TRACKS</b></u></blockquote>\n\n"
         "<blockquote expandable>"
         f"Total tracks: <b>{total_tracks}</b>\n"
         "Tap any track to play and continue from that track onwards.</blockquote>"
@@ -635,21 +636,18 @@ async def stream_plist_self_shuffle_cb(client, CallbackQuery):
         return await mystic.edit_text(f"❌ Error starting stream: {e}")
 
 
-# Handle "Load More" infinite suggestion pagination (Random diverse songs on every load)
+# Handle "Load More" infinite suggestion pagination (Fresh random tracks on each page)
 @app.on_callback_query(filters.regex(r"^suggest_more\|") & ~BANNED_USERS)
 async def suggest_more_pagination(client, CallbackQuery):
     parts = CallbackQuery.data.split("|")
-    query = parts[1]
-    page = int(parts[2])
+    page = int(parts[1])
     chat_id = CallbackQuery.message.chat.id
 
     cached = suggestion_cache.get(chat_id, [])
 
-    # Always fetch from diverse musical pools instead of querying the exact same song
-    random_pool = random.choice(DIVERSE_POOLS)
-    fresh = YoutubeSearch(random_pool, max_results=25).to_dict()
+    # Fetch 20 new tracks from fresh random genres each time
+    fresh = await fetch_random_diverse_tracks()
     if fresh:
-        random.shuffle(fresh)
         seen_ids = {t.get("id") for t in cached}
         seen_titles = {_clean_track_title(t.get("title", ""))[:14].lower() for t in cached}
 
@@ -671,7 +669,7 @@ async def suggest_more_pagination(client, CallbackQuery):
     except Exception:
         pass
 
-    blocks = build_suggestion_blocks(query, cached, page=page)
+    blocks = build_suggestion_blocks(cached, page=page)
     await edit_rich(CallbackQuery.message, blocks)
 
 
