@@ -584,9 +584,9 @@ async def see_plist_self_cb(client, CallbackQuery):
         return await CallbackQuery.answer("❌ Your playlist is empty!", show_alert=True)
 
     caption = (
-        "<blockquote>🎵 <u><b>SAVED PLAYLIST TRACKS</b></u></blockquote>\n\n"
+        "<blockquote><emoji id=5895705279416241926>🎵</emoji> <u><b>SAVED PLAYLIST TRACKS</b></u></blockquote>\n\n"
         "<blockquote expandable>"
-        f"Total tracks: <b>{total_tracks}</b>\n"
+        f"<emoji id=6066395745139824604>📊</emoji> Total tracks: <b>{total_tracks}</b>\n"
         "Tap any track to play and continue from that track onwards.</blockquote>"
     )
     blocks = html_to_rich_blocks(caption)
@@ -741,7 +741,7 @@ async def play_music(client, CallbackQuery, _):
     )
     try:
         details, track_id = await YouTube.track(vidid, True)
-    except Exception:
+    except Exception as e:
         return await _safe_edit_err(mystic, CallbackQuery.message, _["play_3"])
     if details["duration_min"]:
         duration_sec = time_to_seconds(details["duration_min"])
