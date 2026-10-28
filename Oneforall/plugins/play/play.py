@@ -1,6 +1,7 @@
 import inspect
 import math
 import random
+import re
 import string
 from typing import Dict, List, Union
 
@@ -12,7 +13,13 @@ from youtube_search import YoutubeSearch
 import config
 from config import BANNED_USERS, lyrical
 from Oneforall import Apple, Resso, SoundCloud, Spotify, Telegram, YouTube, app
-from Oneforall.core.call import Hotty, build_suggestion_blocks, suggestion_cache
+from Oneforall.core.call import (
+    DIVERSE_POOLS,
+    Hotty,
+    _clean_track_title,
+    build_suggestion_blocks,
+    suggestion_cache,
+)
 from Oneforall.core.mongo import mongodb
 from Oneforall.utils import seconds_to_min, time_to_seconds
 from Oneforall.utils.channelplay import get_channeplayCB
@@ -576,7 +583,7 @@ async def see_plist_self_cb(client, CallbackQuery):
         return await CallbackQuery.answer("❌ Your playlist is empty!", show_alert=True)
 
     caption = (
-        "<blockquote><emoji id=5895705279416241926>🎵</emoji> <u><b>SAVED PLAYLIST TRACKS</b></u></blockquote>\n\n"
+        "<blockquote><tg-emoji emoji-id=\"5895705279416241926\">🎵</tg-emoji> <u><b>SAVED PLAYLIST TRACKS</b></u></blockquote>\n\n"
         "<blockquote expandable>"
         f"Total tracks: <b>{total_tracks}</b>\n"
         "Tap any track to play and continue from that track onwards.</blockquote>"
@@ -628,7 +635,7 @@ async def stream_plist_self_shuffle_cb(client, CallbackQuery):
         return await mystic.edit_text(f"❌ Error starting stream: {e}")
 
 
-# Handle "Load More" infinite suggestion pagination (Replaces previous page)
+# Handle "Load More" infinite suggestion pagination (Random diverse songs on every load)
 @app.on_callback_query(filters.regex(r"^suggest_more\|") & ~BANNED_USERS)
 async def suggest_more_pagination(client, CallbackQuery):
     parts = CallbackQuery.data.split("|")
@@ -636,21 +643,31 @@ async def suggest_more_pagination(client, CallbackQuery):
     page = int(parts[2])
     chat_id = CallbackQuery.message.chat.id
 
-    cached = suggestion_cache.get(chat_id)
-    if not cached or (page * 5) >= len(cached):
-        fresh = YoutubeSearch(f"{query} song mix", max_results=30).to_dict()
-        if fresh:
-            if cached:
-                cached.extend(fresh)
-            else:
-                cached = fresh
-            suggestion_cache[chat_id] = cached
+    cached = suggestion_cache.get(chat_id, [])
+
+    # Always fetch from diverse musical pools instead of querying the exact same song
+    random_pool = random.choice(DIVERSE_POOLS)
+    fresh = YoutubeSearch(random_pool, max_results=25).to_dict()
+    if fresh:
+        random.shuffle(fresh)
+        seen_ids = {t.get("id") for t in cached}
+        seen_titles = {_clean_track_title(t.get("title", ""))[:14].lower() for t in cached}
+
+        for item in fresh:
+            item_id = item.get("id")
+            item_title = _clean_track_title(item.get("title", ""))[:14].lower()
+            if item_id not in seen_ids and item_title not in seen_titles:
+                seen_ids.add(item_id)
+                seen_titles.add(item_title)
+                cached.append(item)
+
+        suggestion_cache[chat_id] = cached
 
     if not cached:
         return await CallbackQuery.answer("❌ No more suggestions found!", show_alert=True)
 
     try:
-        await CallbackQuery.answer("🔄 Loading more songs...", show_alert=False)
+        await CallbackQuery.answer("🔄 Loading fresh songs...", show_alert=False)
     except Exception:
         pass
 
