@@ -83,10 +83,10 @@ def build_suggestion_blocks(query: str, tracks: list, page: int = 0):
         batch = tracks[:5]
 
     caption = (
-        "<blockquote><tg-emoji emoji-id=\"5895705279416241926\">🎶</tg-emoji> <u><b>QUEUE ENDED. HERE ARE SOME SUGGESTIONS...</b></u></blockquote>\n\n"
+        "<blockquote><emoji id=5895705279416241926>🎶</emoji> <u><b>QUEUE ENDED. HERE ARE SOME SUGGESTIONS...</b></u></blockquote>\n\n"
         "<blockquote expandable>"
-        "<tg-emoji emoji-id=\"5974235702701853774\">✨</tg-emoji> Select any track below to start streaming directly.\n"
-        "<tg-emoji emoji-id=\"5409132617750555920\">🔄</tg-emoji> Tap <b>Load More</b> to fetch infinite new recommendations.</blockquote>"
+        "<emoji id=5974235702701853774>✨</emoji> Select any track below to start streaming directly.\n"
+        "<emoji id=5409132617750555920>🔄</emoji> Tap <b>Load More</b> to fetch infinite new recommendations.</blockquote>"
     )
     blocks = html_to_rich_blocks(caption)
 
@@ -143,7 +143,6 @@ async def send_queue_end_suggestions(chat_id: int, last_title: str = None):
             fallback_query = random.choice(DIVERSE_POOLS)
             results = YoutubeSearch(fallback_query, max_results=30).to_dict()
 
-        # Deduplicate titles so the user doesn't see repeated mixes
         seen_titles = set()
         unique_tracks = []
         for r in results:
@@ -502,7 +501,7 @@ class Call(PyTgCalls):
                                 pass
 
                         caption = (
-                            "<blockquote><tg-emoji emoji-id=\"5895705279416241926\">🎲</tg-emoji> <u><b>AUTOPLAY STREAMING</b></u></blockquote>\n\n"
+                            "<blockquote><emoji id=5895705279416241926>🎲</emoji> <u><b>AUTOPLAY STREAMING</b></u></blockquote>\n\n"
                             "<blockquote expandable>"
                             f"🎵 <b>Track:</b> {title[:40]}\n"
                             f"⏱️ <b>Duration:</b> {duration}\n"
