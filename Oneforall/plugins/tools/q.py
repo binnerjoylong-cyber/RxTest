@@ -1,7 +1,9 @@
 import os
+import re
 import textwrap
 from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont
+from httpx import AsyncClient, Timeout
 from pyrogram import filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import StickersetInvalid
@@ -19,25 +21,34 @@ from Oneforall import app
 
 PREMIUM_EMOJI_LEFT = "5895221391220804630"
 PREMIUM_EMOJI_RIGHT = "5895648298085125845"
+PRIMARY_BG_COLOR = "#1b1429"
+ACCENT_COLOR = "#7b5bf2"
+
+http_client = AsyncClient(
+    http2=False,
+    verify=False,
+    headers={
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    },
+    timeout=Timeout(25),
+)
 
 
 # -------------------------------------------------------------------------
-# LOCAL QUOTE GENERATOR (NO THIRD-PARTY API DEPENDENCY - 0% FAILURE)
+# UTF-8 SAFE FALLBACK QUOTE GENERATOR
 # -------------------------------------------------------------------------
+
+def sanitize_text(text: str) -> str:
+    """Non-ASCII characters ko safe string me badalta hai taaki Pillow crash na kare"""
+    if not text:
+        return ""
+    # Safe unicode cleaning
+    return text.encode("utf-8", "ignore").decode("utf-8")
+
 
 def draw_rounded_rect(draw, coords, radius, fill):
-    x1, y1, x2, y2 = coords
-    draw.rounded_rectangle([x1, y1, x2, y2], radius=radius, fill=fill)
-
-
-def make_circular_avatar(im: Image.Image, size: int = 50) -> Image.Image:
-    im = im.convert("RGBA").resize((size, size), Image.Resampling.LANCZOS)
-    mask = Image.new("L", (size, size), 0)
-    draw = ImageDraw.Draw(mask)
-    draw.ellipse((0, 0, size, size), fill=255)
-    output = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    output.paste(im, (0, 0), mask=mask)
-    return output
+    draw.rounded_rectangle(coords, radius=radius, fill=fill)
 
 
 async def generate_local_quote(messages: list) -> BytesIO:
@@ -45,42 +56,44 @@ async def generate_local_quote(messages: list) -> BytesIO:
     margin_x = 20
     content_width = card_width - (margin_x * 2)
 
-    font_name = ImageFont.load_default()
-    font_text = ImageFont.load_default()
-    font_reply = ImageFont.load_default()
+    try:
+        # Standard system font use karein jo Unicode handle kare
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14)
+        font_bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 15)
+    except Exception:
+        font = ImageFont.load_default()
+        font_bold = font
 
     items = []
     total_height = 20
 
     for msg in messages:
-        sender_name = (
+        sender_name = sanitize_text(
             f"{msg.from_user.first_name or ''} {msg.from_user.last_name or ''}".strip()
             if msg.from_user
             else (msg.sender_chat.title if msg.sender_chat else "User")
         )
-        text = msg.text or msg.caption or "Sticker/Media"
+        raw_text = sanitize_text(msg.text or msg.caption or "Media")
 
-        # Text wrapping
-        wrapped_lines = textwrap.wrap(text, width=40)
+        wrapped_lines = textwrap.wrap(raw_text, width=38)
         if not wrapped_lines:
             wrapped_lines = [""]
 
         reply_info = None
         if msg.reply_to_message and len(messages) == 1:
             rep = msg.reply_to_message
-            rep_user = (
+            rep_user = sanitize_text(
                 f"{rep.from_user.first_name or ''} {rep.from_user.last_name or ''}".strip()
                 if rep.from_user
                 else "User"
             )
-            rep_text = rep.text or rep.caption or "Media"
-            rep_text = (rep_text[:30] + "...") if len(rep_text) > 30 else rep_text
+            rep_text = sanitize_text(rep.text or rep.caption or "Media")
+            rep_text = (rep_text[:28] + "...") if len(rep_text) > 28 else rep_text
             reply_info = {"user": rep_user, "text": rep_text}
 
-        # Bubble calculation
-        bubble_h = 30 + (len(wrapped_lines) * 16)
+        bubble_h = 32 + (len(wrapped_lines) * 18)
         if reply_info:
-            bubble_h += 38
+            bubble_h += 42
 
         items.append({
             "name": sender_name,
@@ -90,42 +103,39 @@ async def generate_local_quote(messages: list) -> BytesIO:
         })
         total_height += bubble_h + 15
 
-    # Base Canvas
     img = Image.new("RGBA", (card_width, total_height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
     curr_y = 15
     for item in items:
-        # Chat bubble background
+        # Bubble Box
         draw_rounded_rect(
             draw,
             (margin_x, curr_y, margin_x + content_width, curr_y + item["bubble_h"]),
             radius=16,
-            fill=(27, 20, 41, 240),
+            fill=(27, 20, 41, 245),
         )
 
-        # Name
-        draw.text((margin_x + 15, curr_y + 8), item["name"], fill=(195, 140, 255), font=font_name)
+        # Sender Name
+        draw.text((margin_x + 15, curr_y + 8), item["name"], fill=(195, 140, 255), font=font_bold)
 
-        offset_y = curr_y + 26
+        offset_y = curr_y + 30
 
-        # Reply Quote box if present
         if item["reply"]:
             rx1 = margin_x + 15
             ry1 = offset_y
             rx2 = margin_x + content_width - 15
-            ry2 = offset_y + 32
+            ry2 = offset_y + 36
 
-            draw_rounded_rect(draw, (rx1, ry1, rx2, ry2), radius=6, fill=(40, 30, 60))
+            draw_rounded_rect(draw, (rx1, ry1, rx2, ry2), radius=6, fill=(45, 33, 68))
             draw.rectangle([rx1, ry1, rx1 + 3, ry2], fill=(123, 91, 242))
-            draw.text((rx1 + 8, ry1 + 3), item["reply"]["user"], fill=(160, 160, 255), font=font_reply)
-            draw.text((rx1 + 8, ry1 + 16), item["reply"]["text"], fill=(200, 200, 200), font=font_reply)
-            offset_y += 38
+            draw.text((rx1 + 8, ry1 + 3), item["reply"]["user"], fill=(160, 160, 255), font=font)
+            draw.text((rx1 + 8, ry1 + 18), item["reply"]["text"], fill=(210, 210, 210), font=font)
+            offset_y += 42
 
-        # Message Text
         for line in item["lines"]:
-            draw.text((margin_x + 15, offset_y), line, fill=(255, 255, 255), font=font_text)
-            offset_y += 16
+            draw.text((margin_x + 15, offset_y), line, fill=(255, 255, 255), font=font)
+            offset_y += 18
 
         curr_y += item["bubble_h"] + 15
 
@@ -134,6 +144,91 @@ async def generate_local_quote(messages: list) -> BytesIO:
     out.name = "quote.webp"
     out.seek(0)
     return out
+
+
+# -------------------------------------------------------------------------
+# QUOTLY API HANDLER
+# -------------------------------------------------------------------------
+
+async def fetch_quotly_api(messages: list, is_reply: bool = False):
+    payload = {
+        "type": "quote",
+        "format": "webp",
+        "backgroundColor": PRIMARY_BG_COLOR,
+        "messages": [],
+    }
+
+    for msg in messages:
+        entities = []
+        raw_entities = msg.entities or msg.caption_entities
+        if raw_entities:
+            for ent in raw_entities:
+                entities.append({
+                    "type": ent.type.name.lower(),
+                    "offset": ent.offset,
+                    "length": ent.length,
+                })
+
+        sender_id = msg.from_user.id if msg.from_user else (msg.sender_chat.id if msg.sender_chat else 1)
+        sender_name = (
+            f"{msg.from_user.first_name or ''} {msg.from_user.last_name or ''}".strip()
+            if msg.from_user
+            else (msg.sender_chat.title if msg.sender_chat else "User")
+        )
+        sender_username = (
+            msg.from_user.username
+            if msg.from_user and msg.from_user.username
+            else (msg.sender_chat.username if msg.sender_chat and msg.sender_chat.username else "")
+        )
+
+        msg_data = {
+            "entities": entities,
+            "chatId": sender_id,
+            "text": msg.text or msg.caption or "",
+            "avatar": True,
+            "from": {
+                "id": sender_id,
+                "name": sender_name,
+                "username": sender_username,
+                "type": msg.chat.type.name.lower() if msg.chat else "supergroup",
+                "color": ACCENT_COLOR,
+            },
+        }
+
+        if is_reply and msg.reply_to_message:
+            rep = msg.reply_to_message
+            rep_name = (
+                f"{rep.from_user.first_name or ''} {rep.from_user.last_name or ''}".strip()
+                if rep.from_user
+                else "User"
+            )
+            msg_data["replyMessage"] = {
+                "name": rep_name,
+                "text": rep.text or rep.caption or "",
+                "chatId": rep.from_user.id if rep.from_user else 1,
+            }
+
+        payload["messages"].append(msg_data)
+
+    # Online API primary call
+    endpoints = [
+        "https://bot.lyo.su/quote/generate",
+        "https://quote.chaotic.ninja/generate",
+    ]
+
+    for url in endpoints:
+        try:
+            res = await http_client.post(url, json=payload)
+            if res.status_code == 200 and res.content:
+                out = BytesIO(res.content)
+                out.name = "quote.webp"
+                out.seek(0)
+                return out
+        except Exception:
+            continue
+
+    # Agar API fail ho jaye toh safe local image generator run hoga
+    return await generate_local_quote(messages)
 
 
 # -------------------------------------------------------------------------
@@ -151,23 +246,26 @@ async def quotly_command(client: app, message: Message):
         arg = args[0].lower() if args else ""
         target_msg = message.reply_to_message
 
-        # /q p ya /q r: Original parent message + replied message dono include honge
+        # /q p ya /q r
         if arg in ["p", "r"]:
             if target_msg.reply_to_message:
                 messages = [target_msg.reply_to_message, target_msg]
             else:
                 messages = [target_msg]
+            is_reply = False
         elif arg.isdigit():
             count = max(1, min(int(arg), 10))
             msg_ids = list(range(target_msg.id, target_msg.id + count))
             fetched = await client.get_messages(chat_id=message.chat.id, message_ids=msg_ids)
             messages = [m for m in fetched if m and not m.empty]
+            is_reply = False
         else:
             messages = [target_msg]
+            is_reply = bool(target_msg.reply_to_message)
 
-        quote_file = await generate_local_quote(messages)
+        sticker_file = await fetch_quotly_api(messages, is_reply=is_reply)
 
-        await message.reply_sticker(sticker=quote_file)
+        await message.reply_sticker(sticker=sticker_file)
         await status_msg.delete()
 
     except Exception as e:
@@ -178,7 +276,7 @@ async def quotly_command(client: app, message: Message):
 
 
 # -------------------------------------------------------------------------
-# KANG HANDLER (/kang) - Auto Pack Creator & Sticker Refresher
+# KANG HANDLER (/kang)
 # -------------------------------------------------------------------------
 
 async def convert_to_valid_sticker(image_path: str) -> BytesIO:
@@ -305,7 +403,6 @@ async def kang_command(client: app, message: Message):
             reply_markup=button,
         )
 
-        # Telegram cache refresh sticker drop
         sticker_data.seek(0)
         await message.reply_sticker(sticker=sticker_data)
 
