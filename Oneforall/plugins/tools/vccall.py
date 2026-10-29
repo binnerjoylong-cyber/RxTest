@@ -4,7 +4,7 @@ from logging import getLogger
 from typing import Dict, Set
 
 from pyrogram import enums, filters
-from pyrogram.raw import functions
+from pyrogram.raw import functions, types as raw_types
 from pyrogram.types import Message
 
 from Oneforall import app
@@ -51,6 +51,37 @@ async def get_vc_logger_status(chat_id: int) -> bool:
     return vc_logging_status.get(chat_id, False)
 
 
+# ───────── UNIVERSAL PARTICIPANTS FETCHER (NO ASSISTANT IN CHAT NEEDED) ─────────
+async def get_group_call_participants(client, chat_id: int):
+    try:
+        peer = await client.resolve_peer(chat_id)
+        call = None
+
+        if isinstance(peer, raw_types.InputPeerChannel):
+            full = await client.invoke(functions.channels.GetFullChannel(channel=peer))
+            call = getattr(full.full_chat, "call", None)
+        elif isinstance(peer, raw_types.InputPeerChat):
+            full = await client.invoke(functions.messages.GetFullChat(chat_id=peer.chat_id))
+            call = getattr(full.full_chat, "call", None)
+
+        if not call:
+            return []
+
+        res = await client.invoke(
+            functions.phone.GetGroupParticipants(
+                call=call,
+                ids=[],
+                sources=[],
+                offset="",
+                limit=100,
+            )
+        )
+        return res.participants
+    except Exception as e:
+        LOGGER.error(f"Participant fetch error on client: {e}")
+        return []
+
+
 # ───────── VC LOGGER COMMAND (ONLY ADMIN / OWNER) ─────────
 @app.on_message(filters.command("vclogger", prefixes=["/", "!"]) & filters.group)
 async def vclogger_command(_, message: Message):
@@ -60,7 +91,6 @@ async def vclogger_command(_, message: Message):
     if not user_id:
         return
 
-    # Check if the sender is admin or owner
     if not await is_admin_or_owner(chat_id, user_id):
         return await message.reply("❌ **Only group admins or owner can configure VC logger.**")
 
@@ -93,38 +123,17 @@ async def vclogger_command(_, message: Message):
         await message.reply("🚫 <b>ᴠ¢ ℓσggєʀ ∂ιѕαвℓє∂</b>")
 
 
-# ───────── GET PARTICIPANTS ─────────
-async def get_group_call_participants(userbot, peer):
-    try:
-        full = await userbot.invoke(functions.channels.GetFullChannel(channel=peer))
-        if not full.full_chat.call:
-            return []
-
-        call = full.full_chat.call
-        res = await userbot.invoke(
-            functions.phone.GetGroupParticipants(
-                call=call,
-                ids=[],
-                sources=[],
-                offset="",
-                limit=100,
-            )
-        )
-        return res.participants
-    except Exception:
-        return []
-
-
 # ───────── MONITOR VC ─────────
 async def monitor_vc_chat(chat_id: int):
+    # Assistant fallback if available, else bot itself
     userbot = await get_assistant(chat_id)
-    if not userbot:
-        return
 
     while chat_id in active_vc_chats and await get_vc_logger_status(chat_id):
         try:
-            peer = await userbot.resolve_peer(chat_id)
-            participants = await get_group_call_participants(userbot, peer)
+            # First try Bot client (no assistant join needed)
+            participants = await get_group_call_participants(app, chat_id)
+            if not participants and userbot:
+                participants = await get_group_call_participants(userbot, chat_id)
 
             new_users = {
                 p.peer.user_id
@@ -135,23 +144,23 @@ async def monitor_vc_chat(chat_id: int):
             old_users = vc_active_users.get(chat_id, set())
 
             for uid in new_users - old_users:
-                asyncio.create_task(handle_user_join(chat_id, uid, userbot))
+                asyncio.create_task(handle_user_join(chat_id, uid))
 
             for uid in old_users - new_users:
-                asyncio.create_task(handle_user_leave(chat_id, uid, userbot))
+                asyncio.create_task(handle_user_leave(chat_id, uid))
 
             vc_active_users[chat_id] = new_users
 
         except Exception as e:
-            LOGGER.error(f"VC Monitor Error: {e}")
+            LOGGER.error(f"VC Monitor Loop Error: {e}")
 
         await asyncio.sleep(5)
 
 
-# ───────── JOIN ─────────
-async def handle_user_join(chat_id: int, user_id: int, userbot):
+# ───────── JOIN LOG ─────────
+async def handle_user_join(chat_id: int, user_id: int):
     try:
-        user = await userbot.get_users(user_id)
+        user = await app.get_users(user_id)
         chat = await app.get_chat(chat_id)
         now = datetime.now().strftime("%d %b %Y • %H:%M:%S")
 
@@ -179,10 +188,10 @@ async def handle_user_join(chat_id: int, user_id: int, userbot):
         LOGGER.error(f"Join Log Error: {e}")
 
 
-# ───────── LEAVE ─────────
-async def handle_user_leave(chat_id: int, user_id: int, userbot):
+# ───────── LEAVE LOG ─────────
+async def handle_user_leave(chat_id: int, user_id: int):
     try:
-        user = await userbot.get_users(user_id)
+        user = await app.get_users(user_id)
         chat = await app.get_chat(chat_id)
         now = datetime.now().strftime("%d %b %Y • %H:%M:%S")
 
@@ -210,58 +219,61 @@ async def handle_user_leave(chat_id: int, user_id: int, userbot):
         LOGGER.error(f"Leave Log Error: {e}")
 
 
-# ───────── VC MEMBERS COMMAND (ANYONE CAN USE) ─────────
+# ───────── VC MEMBERS COMMAND (ANYONE CAN RUN - NO BOT ADMIN NEEDED) ─────────
 @app.on_message(filters.command(["vcmembers", "seevc"], prefixes=["/", "!"]) & filters.group)
 async def vcmembers_command(_, message: Message):
     chat_id = message.chat.id
-    userbot = await get_assistant(chat_id)
 
-    if not userbot:
-        return await message.reply("⚠️ **No assistant available for this chat.**")
+    # 1. Fetch through Main Bot directly (No Assistant in group required)
+    participants = await get_group_call_participants(app, chat_id)
 
-    try:
-        peer = await userbot.resolve_peer(chat_id)
-        participants = await get_group_call_participants(userbot, peer)
-    except Exception as e:
-        return await message.reply(f"❌ **Error fetching VC status:** <code>{e}</code>")
+    # 2. Fallback to Assistant only if Bot gets empty list
+    if not participants:
+        userbot = await get_assistant(chat_id)
+        if userbot:
+            participants = await get_group_call_participants(userbot, chat_id)
 
     if not participants:
         return await message.reply("ℹ️ **ᴠ¢ ɪѕ ᴇᴍᴘᴛʏ / ɴᴏ ᴀᴄᴛɪᴠᴇ ᴄᴀʟʟ.**")
 
-    # Header blockquote
     final_output = [
         "<blockquote>🌟 <u><b>ᴠ¢ ᴀᴄᴛɪᴠᴇ ᴍᴇᴍʙᴇʀs</b></u>\n"
         f"📊 <b>ᴛᴏᴛᴀʟ ᴜsᴇʀs :</b> <code>{len(participants)}</code></blockquote>\n"
     ]
 
     for p in participants:
-        if hasattr(p.peer, "user_id"):
-            try:
-                user = await userbot.get_users(p.peer.user_id)
-            except Exception:
-                continue
+        uid = getattr(p, "user_id", None)
+        if not uid and hasattr(p, "peer") and hasattr(p.peer, "user_id"):
+            uid = p.peer.user_id
 
-            video = "Yes" if getattr(p, "video", False) else "No"
-            screen = "Yes" if getattr(p, "presentation", False) else "No"
-            hand = "Yes" if getattr(p, "raise_hand_rating", None) is not None else "No"
-            muted = "Yes" if getattr(p, "muted", False) else "No"
-            speaking = "Yes" if getattr(p, "active_date", None) is not None else "No"
-            left = "Yes" if getattr(p, "left", False) else "No"
+        if not uid:
+            continue
 
-            final_output.append(
-                f"<blockquote expandable>"
-                f"👤 <b>ɴᴀᴍᴇ:</b> {user.mention}\n"
-                f"🆔 <b>ɪᴅ:</b> <code>{user.id}</code>\n"
-                f"🔗 <b>ᴜsᴇʀɴᴀᴍᴇ:</b> @{user.username if user.username else 'None'}\n"
-                f"📹 <b>ᴠɪᴅᴇᴏ:</b> <code>{video}</code> | 💻 <b>sᴄʀᴇᴇɴ:</b> <code>{screen}</code>\n"
-                f"✋ <b>ʜᴀɴᴅ:</b> <code>{hand}</code> | 🎙️ <b>ᴍᴜᴛᴇᴅ:</b> <code>{muted}</code>\n"
-                f"🔊 <b>sᴘᴇᴀᴋɪɴɢ:</b> <code>{speaking}</code> | 🚪 <b>ʟᴇғᴛ:</b> <code>{left}</code>"
-                f"</blockquote>\n"
-            )
+        try:
+            user = await app.get_users(uid)
+        except Exception:
+            continue
+
+        video = "Yes" if getattr(p, "video", False) else "No"
+        screen = "Yes" if getattr(p, "presentation", False) else "No"
+        hand = "Yes" if getattr(p, "raise_hand_rating", None) is not None else "No"
+        muted = "Yes" if getattr(p, "muted", False) else "No"
+        speaking = "Yes" if getattr(p, "active_date", None) is not None else "No"
+        left = "Yes" if getattr(p, "left", False) else "No"
+
+        final_output.append(
+            f"<blockquote expandable>"
+            f"👤 <b>ɴᴀᴍᴇ:</b> {user.mention}\n"
+            f"🆔 <b>ɪᴅ:</b> <code>{user.id}</code>\n"
+            f"🔗 <b>ᴜsᴇʀɴᴀᴍᴇ:</b> @{user.username if user.username else 'None'}\n"
+            f"📹 <b>ᴠɪᴅᴇᴏ:</b> <code>{video}</code> | 💻 <b>sᴄʀᴇᴇɴ:</b> <code>{screen}</code>\n"
+            f"✋ <b>ʜᴀɴᴅ:</b> <code>{hand}</code> | 🎙️ <b>ᴍᴜᴛᴇᴅ:</b> <code>{muted}</code>\n"
+            f"🔊 <b>sᴘᴇᴀᴋɪɴɢ:</b> <code>{speaking}</code> | 🚪 <b>ʟᴇғᴛ:</b> <code>{left}</code>"
+            f"</blockquote>\n"
+        )
 
     msg_text = "\n".join(final_output)
 
-    # Telegram limit guard
     if len(msg_text) > 4096:
         for chunk in [msg_text[i:i + 4000] for i in range(0, len(msg_text), 4000)]:
             await message.reply(chunk)
