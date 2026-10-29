@@ -17,27 +17,26 @@ from pyrogram.raw.types import (
 
 from Oneforall import app
 
-# Configured Custom Emojis & Premium Palette
-PRIMARY_BG_COLOR = "#1b1429"
-ACCENT_COLOR = "#7b5bf2"
 PREMIUM_EMOJI_LEFT = "5895221391220804630"
 PREMIUM_EMOJI_RIGHT = "5895648298085125845"
+PRIMARY_BG_COLOR = "#1b1429"
+ACCENT_COLOR = "#7b5bf2"
 
-# Multi-Endpoints for Quotly to handle Cloudflare 526 SSL issues
-QUOTLY_ENDPOINTS = [
-    "https://quote.antispam.bot/generate",
-    "https://bot.lyo.su/quote/generate",
-    "https://quotly.su/generate",
+# Direct Working Quotly REST Endpoints (Cloudflare SSL Bypass)
+QUOTLY_SERVERS = [
+    "https://quotly.herokuapp.com/generate",
+    "https://quote-generator.deno.dev/generate",
+    "https://bot.lyo.su/quote/generate.png",
 ]
 
-fetch = AsyncClient(
+client_http = AsyncClient(
     http2=False,
     verify=False,
     headers={
         "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
     },
-    timeout=Timeout(25),
+    timeout=Timeout(30),
 )
 
 
@@ -49,64 +48,54 @@ class QuotlyException(Exception):
 # QUOTLY HELPERS
 # -------------------------------------------------------------------------
 
-async def get_message_sender_id(ctx: Message) -> int:
-    if ctx.forward_date:
-        if ctx.forward_from:
-            return ctx.forward_from.id
-        elif ctx.forward_from_chat:
-            return ctx.forward_from_chat.id
+async def get_sender_id(msg: Message) -> int:
+    if msg.forward_date:
+        if msg.forward_from:
+            return msg.forward_from.id
+        if msg.forward_from_chat:
+            return msg.forward_from_chat.id
         return 1
-    if ctx.from_user:
-        return ctx.from_user.id
-    if ctx.sender_chat:
-        return ctx.sender_chat.id
+    if msg.from_user:
+        return msg.from_user.id
+    if msg.sender_chat:
+        return msg.sender_chat.id
     return 1
 
 
-async def get_message_sender_name(ctx: Message) -> str:
-    if ctx.forward_date:
-        if ctx.forward_sender_name:
-            return ctx.forward_sender_name
-        if ctx.forward_from:
-            return f"{ctx.forward_from.first_name or ''} {ctx.forward_from.last_name or ''}".strip()
-        if ctx.forward_from_chat:
-            return ctx.forward_from_chat.title or "Channel"
+async def get_sender_name(msg: Message) -> str:
+    if msg.forward_date:
+        if msg.forward_sender_name:
+            return msg.forward_sender_name
+        if msg.forward_from:
+            return f"{msg.forward_from.first_name or ''} {msg.forward_from.last_name or ''}".strip()
+        if msg.forward_from_chat:
+            return msg.forward_from_chat.title or "Channel"
         return "Unknown"
-    if ctx.from_user:
-        return f"{ctx.from_user.first_name or ''} {ctx.from_user.last_name or ''}".strip()
-    if ctx.sender_chat:
-        return ctx.sender_chat.title or "Channel"
+    if msg.from_user:
+        return f"{msg.from_user.first_name or ''} {msg.from_user.last_name or ''}".strip()
+    if msg.sender_chat:
+        return msg.sender_chat.title or "Channel"
     return "Unknown"
 
 
-async def get_message_sender_username(ctx: Message) -> str:
-    if ctx.forward_date:
-        if ctx.forward_from and ctx.forward_from.username:
-            return ctx.forward_from.username
-        if ctx.forward_from_chat and ctx.forward_from_chat.username:
-            return ctx.forward_from_chat.username
+async def get_sender_username(msg: Message) -> str:
+    if msg.forward_date:
+        if msg.forward_from and msg.forward_from.username:
+            return msg.forward_from.username
+        if msg.forward_from_chat and msg.forward_from_chat.username:
+            return msg.forward_from_chat.username
         return ""
-    if ctx.from_user and ctx.from_user.username:
-        return ctx.from_user.username
-    if ctx.sender_chat and ctx.sender_chat.username:
-        return ctx.sender_chat.username
+    if msg.from_user and msg.from_user.username:
+        return msg.from_user.username
+    if msg.sender_chat and msg.sender_chat.username:
+        return msg.sender_chat.username
     return ""
-
-
-async def get_text_or_caption(ctx: Message) -> str:
-    return ctx.text or ctx.caption or ""
-
-
-async def get_custom_emoji_id(ctx: Message) -> str:
-    if ctx.from_user and ctx.from_user.emoji_status:
-        return str(ctx.from_user.emoji_status.custom_emoji_id)
-    return PREMIUM_EMOJI_LEFT
 
 
 async def pyrogram_to_quotly(messages: list, is_reply: bool = False):
     payload = {
         "type": "quote",
-        "format": "webp",
+        "format": "png",
         "backgroundColor": PRIMARY_BG_COLOR,
         "messages": [],
     }
@@ -116,28 +105,25 @@ async def pyrogram_to_quotly(messages: list, is_reply: bool = False):
         raw_entities = msg.entities or msg.caption_entities
         if raw_entities:
             for ent in raw_entities:
-                item = {
+                entities.append({
                     "type": ent.type.name.lower(),
                     "offset": ent.offset,
                     "length": ent.length,
-                }
-                if hasattr(ent, "custom_emoji_id") and ent.custom_emoji_id:
-                    item["customEmojiId"] = str(ent.custom_emoji_id)
-                entities.append(item)
+                })
 
-        custom_status = await get_custom_emoji_id(msg)
+        user_name = await get_sender_name(msg)
+        msg_text = msg.text or msg.caption or ""
 
         msg_data = {
             "entities": entities,
-            "chatId": await get_message_sender_id(msg),
-            "text": await get_text_or_caption(msg),
+            "chatId": await get_sender_id(msg),
+            "text": msg_text,
             "avatar": True,
-            "emojiStatus": custom_status,
             "from": {
-                "id": await get_message_sender_id(msg),
-                "name": await get_message_sender_name(msg),
-                "username": await get_message_sender_username(msg),
-                "type": msg.chat.type.name.lower() if msg.chat else "supergroup",
+                "id": await get_sender_id(msg),
+                "name": user_name,
+                "username": await get_sender_username(msg),
+                "type": "user",
                 "color": ACCENT_COLOR,
             },
         }
@@ -145,25 +131,31 @@ async def pyrogram_to_quotly(messages: list, is_reply: bool = False):
         if is_reply and msg.reply_to_message:
             rep = msg.reply_to_message
             msg_data["replyMessage"] = {
-                "name": await get_message_sender_name(rep),
-                "text": await get_text_or_caption(rep),
-                "chatId": await get_message_sender_id(rep),
+                "name": await get_sender_name(rep),
+                "text": rep.text or rep.caption or "",
+                "chatId": await get_sender_id(rep),
             }
 
         payload["messages"].append(msg_data)
 
-    last_error = "All API mirrors failed"
-    for url in QUOTLY_ENDPOINTS:
+    last_error = ""
+    for endpoint in QUOTLY_SERVERS:
         try:
-            r = await fetch.post(url, json=payload)
-            if r.status_code == 200 and r.content:
-                return r.read()
-            last_error = f"HTTP {r.status_code}"
+            res = await client_http.post(endpoint, json=payload)
+            if res.status_code == 200 and res.content:
+                # Convert PNG to valid Telegram WEBP sticker
+                img = Image.open(BytesIO(res.content))
+                out = BytesIO()
+                img.save(out, format="WEBP")
+                out.name = "quote.webp"
+                out.seek(0)
+                return out
+            last_error = f"HTTP {res.status_code}"
         except Exception as e:
             last_error = str(e)
             continue
 
-    raise QuotlyException(f"API Error ({last_error})")
+    raise QuotlyException(last_error or "Quotly servers down")
 
 
 # -------------------------------------------------------------------------
@@ -179,10 +171,10 @@ async def quotly_command(client: app, message: Message):
     try:
         args = message.text.split()[1:] if message.text else []
         arg = args[0].lower() if args else ""
+        target_msg = message.reply_to_message
 
-        # /q p ya /q r: Dono users ka parent + reply ek sath quote me
+        # /q p ya /q r: Dono users ka conversation merge karega
         if arg in ["p", "r"]:
-            target_msg = message.reply_to_message
             if target_msg.reply_to_message:
                 messages = [target_msg.reply_to_message, target_msg]
             else:
@@ -190,18 +182,15 @@ async def quotly_command(client: app, message: Message):
             is_reply = False
         elif arg.isdigit():
             count = max(1, min(int(arg), 10))
-            msg_ids = list(range(message.reply_to_message.id, message.reply_to_message.id + count))
+            msg_ids = list(range(target_msg.id, target_msg.id + count))
             fetched = await client.get_messages(chat_id=message.chat.id, message_ids=msg_ids)
             messages = [m for m in fetched if m and not m.empty]
             is_reply = False
         else:
-            messages = [message.reply_to_message]
-            is_reply = bool(message.reply_to_message.reply_to_message)
+            messages = [target_msg]
+            is_reply = bool(target_msg.reply_to_message)
 
-        quote_bytes = await pyrogram_to_quotly(messages, is_reply=is_reply)
-
-        sticker_file = BytesIO(quote_bytes)
-        sticker_file.name = "quote.webp"
+        sticker_file = await pyrogram_to_quotly(messages, is_reply=is_reply)
 
         await message.reply_sticker(sticker=sticker_file)
         await status_msg.delete()
@@ -219,7 +208,18 @@ async def quotly_command(client: app, message: Message):
 
 async def convert_to_valid_sticker(image_path: str) -> BytesIO:
     im = Image.open(image_path)
-    im.thumbnail((512, 512), Image.Resampling.LANCZOS)
+    if im.mode != "RGBA":
+        im = im.convert("RGBA")
+
+    width, height = im.size
+    if width > height:
+        scale = 512 / width
+        new_size = (512, int(height * scale))
+    else:
+        scale = 512 / height
+        new_size = (int(width * scale), 512)
+
+    im = im.resize(new_size, Image.Resampling.LANCZOS)
     output = BytesIO()
     im.save(output, format="WEBP")
     output.name = "sticker.webp"
