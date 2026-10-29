@@ -18,17 +18,24 @@ from pyrogram.raw.types import (
 from Oneforall import app
 
 # Configured Custom Emojis & Premium Palette
-PRIMARY_BG_COLOR = "#141318"
+PRIMARY_BG_COLOR = "#1b1429"
 ACCENT_COLOR = "#7b5bf2"
 PREMIUM_EMOJI_LEFT = "5895221391220804630"
 PREMIUM_EMOJI_RIGHT = "5895648298085125845"
 
+# Multi-Endpoints for Quotly to handle Cloudflare 526 SSL issues
+QUOTLY_ENDPOINTS = [
+    "https://quote.antispam.bot/generate",
+    "https://bot.lyo.su/quote/generate",
+    "https://quotly.su/generate",
+]
+
 fetch = AsyncClient(
-    http2=True,
+    http2=False,
     verify=False,
     headers={
-        "Accept-Language": "en-US,en;q=0.9",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     },
     timeout=Timeout(25),
 )
@@ -145,15 +152,18 @@ async def pyrogram_to_quotly(messages: list, is_reply: bool = False):
 
         payload["messages"].append(msg_data)
 
-    r = await fetch.post("https://bot.lyo.su/quote/generate", json=payload)
-    if r.status_code == 200:
-        return r.read()
-    else:
+    last_error = "All API mirrors failed"
+    for url in QUOTLY_ENDPOINTS:
         try:
-            err = r.json().get("message", r.text)
-        except Exception:
-            err = f"API Error (HTTP {r.status_code})"
-        raise QuotlyException(err)
+            r = await fetch.post(url, json=payload)
+            if r.status_code == 200 and r.content:
+                return r.read()
+            last_error = f"HTTP {r.status_code}"
+        except Exception as e:
+            last_error = str(e)
+            continue
+
+    raise QuotlyException(f"API Error ({last_error})")
 
 
 # -------------------------------------------------------------------------
@@ -170,6 +180,7 @@ async def quotly_command(client: app, message: Message):
         args = message.text.split()[1:] if message.text else []
         arg = args[0].lower() if args else ""
 
+        # /q p ya /q r: Dono users ka parent + reply ek sath quote me
         if arg in ["p", "r"]:
             target_msg = message.reply_to_message
             if target_msg.reply_to_message:
@@ -197,12 +208,13 @@ async def quotly_command(client: app, message: Message):
 
     except Exception as e:
         await status_msg.edit_text(
-            f'<emoji id="{PREMIUM_EMOJI_RIGHT}">❌</emoji> **Eʀʀᴏʀ:**\n`{str(e)}`'
+            f'<emoji id="{PREMIUM_EMOJI_RIGHT}">❌</emoji> **Eʀʀᴏʀ:**\n'
+            f'> `{str(e)}`'
         )
 
 
 # -------------------------------------------------------------------------
-# KANG HANDLER (/kang) - Auto Pack Creator & Sticker Adder
+# KANG HANDLER (/kang)
 # -------------------------------------------------------------------------
 
 async def convert_to_valid_sticker(image_path: str) -> BytesIO:
@@ -262,7 +274,7 @@ async def kang_command(client: app, message: Message):
         pack_created = False
         while not pack_created:
             short_name = f"a{user.id}_pack{pack_num}_by_{bot_user.username}"
-            pack_title = f"{user.first_name}'s Kang Static #{pack_num}"
+            pack_title = f"</> Kᴀɴɢ Sᴛᴀᴛɪᴄ #{pack_num}"
 
             try:
                 sticker_set = await client.invoke(
@@ -309,16 +321,17 @@ async def kang_command(client: app, message: Message):
         )
 
         await status_msg.edit_text(
-            f'<emoji id="{PREMIUM_EMOJI_LEFT}">✨</emoji> **Kᴀɴɢᴇᴅ Sᴜᴄᴄᴇssғᴜʟʟʏ!**\n\n'
-            f'**Pᴀᴄᴋ:** `{pack_title}`\n'
-            f'**Eᴍᴏᴊɪ:** {sticker_emoji}\n'
-            f'**Tʏᴘᴇ:** Rᴇɢᴜʟᴀʀ',
+            f'<emoji id="{PREMIUM_EMOJI_LEFT}">✨</emoji> **Kᴀɴɢᴇᴅ.**\n\n'
+            f'> **Pᴀᴄᴋ:** `{pack_title}`\n'
+            f'> **Tʏᴘᴇ:** `ʀᴇɢᴜʟᴀʀ`\n'
+            f'> **Eᴍᴏᴊɪ:** {sticker_emoji}',
             reply_markup=button,
         )
 
     except Exception as e:
         await status_msg.edit_text(
-            f'<emoji id="{PREMIUM_EMOJI_RIGHT}">❌</emoji> **Eʀʀᴏʀ:**\n`{str(e)}`'
+            f'<emoji id="{PREMIUM_EMOJI_RIGHT}">❌</emoji> **Eʀʀᴏʀ:**\n'
+            f'> `{str(e)}`'
         )
     finally:
         if temp_path and os.path.exists(temp_path):
@@ -335,14 +348,14 @@ __HELP__ = """
 **Qᴜᴏᴛᴇ & Sᴛɪᴄᴋᴇʀ Mᴏᴅᴜʟᴇ**
 
 **Qᴜᴏᴛᴇ Cᴏᴍᴍᴀɴᴅs:**
-• `/q` : Qᴜᴏᴛᴇ ᴀ sɪɴɢʟᴇ ᴍᴇssᴀɢᴇ.
-• `/q p` ᴏʀ `/q r` : Qᴜᴏᴛᴇ ʀᴇᴘʟɪᴇᴅ ᴍᴇssᴀɢᴇ ᴡɪᴛʜ ɪᴛs ᴘᴀʀᴇɴᴛ ᴍᴇssᴀɢᴇ.
-• `/q [1-10]` : Qᴜᴏᴛᴇ ᴍᴜʟᴛɪᴘʟᴇ ᴍᴇssᴀɢᴇs ᴀᴛ ᴏɴᴄᴇ (ᴇ.ɢ. `/q 3`).
+> • `/q` : Qᴜᴏᴛᴇ ᴀ sɪɴɢʟᴇ ᴍᴇssᴀɢᴇ.
+> • `/q p` ᴏʀ `/q r` : Qᴜᴏᴛᴇ ʀᴇᴘʟɪᴇᴅ ᴍᴇssᴀɢᴇ ᴡɪᴛʜ ɪᴛs ᴘᴀʀᴇɴᴛ ᴍᴇssᴀɢᴇ.
+> • `/q [1-10]` : Qᴜᴏᴛᴇ ᴍᴜʟᴛɪᴘʟᴇ ᴍᴇssᴀɢᴇs ᴀᴛ ᴏɴᴄᴇ (ᴇ.ɢ. `/q 3`).
 
 **Sᴛɪᴄᴋᴇʀ Kᴀɴɢ Cᴏᴍᴍᴀɴᴅs:**
-• `/kang` : Kᴀɴɢ sᴛɪᴄᴋᴇʀ, ᴘʜᴏᴛᴏ ᴏʀ ᴅᴏᴄᴜᴍᴇɴᴛ ᴛᴏ ʏᴏᴜʀ ᴘᴇʀsᴏɴᴀʟ ᴘᴀᴄᴋ.
-• `/kang [emoji]` : Kᴀɴɢ ᴡɪᴛʜ ʏᴏᴜʀ ᴄᴜsᴛᴏᴍ ᴇᴍᴏᴊɪ (ᴇ.ɢ. `/kang 🔥`).
+> • `/kang` : Kᴀɴɢ sᴛɪᴄᴋᴇʀ, ᴘʜᴏᴛᴏ ᴏʀ ᴅᴏᴄᴜᴍᴇɴᴛ ᴛᴏ ʏᴏᴜʀ ᴘᴇʀsᴏɴᴀʟ ᴘᴀᴄᴋ.
+> • `/kang [emoji]` : Kᴀɴɢ ᴡɪᴛʜ ʏᴏᴜʀ ᴄᴜsᴛᴏᴍ ᴇᴍᴏᴊɪ (ᴇ.ɢ. `/kang 🔥`).
 
 **Nᴏᴛᴇ:**
-• Hᴀᴍᴇsʜᴀ ᴛᴀʀɢᴇᴛ ᴍᴇssᴀɢᴇ ʏᴀ ᴍᴇᴅɪᴀ ᴘᴀʀ **Rᴇᴘʟʏ** ᴋᴀʀᴋᴇ ʜɪ ᴄᴏᴍᴍᴀɴᴅ ᴜsᴇ ᴋᴀʀᴇɪɴ.
+> • Hᴀᴍᴇsʜᴀ ᴛᴀʀɢᴇᴛ ᴍᴇssᴀɢᴇ ʏᴀ ᴍᴇᴅɪᴀ ᴘᴀʀ **Rᴇᴘʟʏ** ᴋᴀʀᴋᴇ ʜɪ ᴄᴏᴍᴍᴀɴᴅ ᴜsᴇ ᴋᴀʀᴇɪɴ.
 """
