@@ -7,13 +7,15 @@ from pyrogram import enums, filters
 from pyrogram.raw import functions, types as raw_types
 from pyrogram.types import Message
 
+import config
 from Oneforall import app
-from Oneforall.utils.database import get_assistant
+from Oneforall.misc import SUDOERS
+from Oneforall.utils.database import get_assistant, is_nonadmin_chat
 
 LOGGER = getLogger(__name__)
 
 # ───────── CONFIG ─────────
-VC_LOG_CHANNEL_ID = -1003634796457  # PUT YOUR VC LOG CHANNEL ID
+VC_LOG_CHANNEL_ID = -1003813864849  # PUT YOUR VC LOG CHANNEL ID
 
 # ───────── STATE ─────────
 vc_active_users: Dict[int, Set[int]] = {}
@@ -34,16 +36,45 @@ def to_small_caps(text: str):
     return "".join(mapping.get(c, c) for c in text)
 
 
-# ───────── ADMIN CHECK (BOT ADMIN NOT REQUIRED) ─────────
-async def is_admin_or_owner(chat_id: int, user_id: int) -> bool:
-    try:
-        member = await app.get_chat_member(chat_id, user_id)
-        return member.status in (
-            enums.ChatMemberStatus.ADMINISTRATOR,
-            enums.ChatMemberStatus.OWNER,
-        )
-    except Exception:
+# ───────── COMPREHENSIVE PERMISSION CHECK (ADMIN / OWNER / SUDO / AUTH) ─────────
+async def is_admin_or_owner(message: Message) -> bool:
+    user_id = message.from_user.id if message.from_user else None
+
+    # Anonymous admin handling
+    if message.sender_chat and message.sender_chat.id == message.chat.id:
+        return True
+
+    if not user_id:
         return False
+
+    # Check SUDO users & Bot Owner
+    if user_id in SUDOERS or user_id == config.OWNER_ID:
+        return True
+
+    # Check chat admin list directly without depending on bot rights
+    try:
+        async for admin in app.get_chat_members(message.chat.id, filter=enums.ChatMembersFilter.ADMINISTRATORS):
+            if admin.user and admin.user.id == user_id:
+                return True
+    except Exception:
+        pass
+
+    # Check single member status fallback
+    try:
+        m = await app.get_chat_member(message.chat.id, user_id)
+        if m.status in (enums.ChatMemberStatus.ADMINISTRATOR, enums.ChatMemberStatus.OWNER):
+            return True
+    except Exception:
+        pass
+
+    # Auth chat check from database if configured
+    try:
+        if await is_nonadmin_chat(message.chat.id):
+            return True
+    except Exception:
+        pass
+
+    return False
 
 
 # ───────── STATUS ─────────
@@ -51,14 +82,22 @@ async def get_vc_logger_status(chat_id: int) -> bool:
     return vc_logging_status.get(chat_id, False)
 
 
-# ───────── UNIVERSAL PARTICIPANTS FETCHER (NO ASSISTANT IN CHAT NEEDED) ─────────
+# ───────── BULLETPROOF GROUP CALL RESOLVER (NO BOT ADMIN REQUIRED) ─────────
 async def get_group_call_participants(client, chat_id: int):
     try:
+        # Directly build raw peer
         peer = await client.resolve_peer(chat_id)
         call = None
 
         if isinstance(peer, raw_types.InputPeerChannel):
-            full = await client.invoke(functions.channels.GetFullChannel(channel=peer))
+            full = await client.invoke(
+                functions.channels.GetFullChannel(
+                    channel=raw_types.InputChannel(
+                        channel_id=peer.channel_id,
+                        access_hash=peer.access_hash,
+                    )
+                )
+            )
             call = getattr(full.full_chat, "call", None)
         elif isinstance(peer, raw_types.InputPeerChat):
             full = await client.invoke(functions.messages.GetFullChat(chat_id=peer.chat_id))
@@ -78,21 +117,17 @@ async def get_group_call_participants(client, chat_id: int):
         )
         return res.participants
     except Exception as e:
-        LOGGER.error(f"Participant fetch error on client: {e}")
+        LOGGER.error(f"VC Participant fetch failed: {e}")
         return []
 
 
-# ───────── VC LOGGER COMMAND (ONLY ADMIN / OWNER) ─────────
+# ───────── VC LOGGER COMMAND ─────────
 @app.on_message(filters.command("vclogger", prefixes=["/", "!"]) & filters.group)
 async def vclogger_command(_, message: Message):
     chat_id = message.chat.id
-    user_id = message.from_user.id if message.from_user else None
 
-    if not user_id:
-        return
-
-    if not await is_admin_or_owner(chat_id, user_id):
-        return await message.reply("❌ **Only group admins or owner can configure VC logger.**")
+    if not await is_admin_or_owner(message):
+        return await message.reply("❌ **Sirf group admins, owner ya sudo users hi VC logger control kar sakte hain.**")
 
     args = message.text.split()
 
@@ -108,7 +143,7 @@ async def vclogger_command(_, message: Message):
 
     if arg in ("on", "enable", "yes"):
         if await get_vc_logger_status(chat_id):
-            return await message.reply("ℹ️ <b>ᴠ¢ ℓσggєʀ is already enabled.</b>")
+            return await message.reply("ℹ️ <b>ᴠ¢ ℓσggєʀ already enabled hai.</b>")
         vc_logging_status[chat_id] = True
         active_vc_chats.add(chat_id)
         asyncio.create_task(monitor_vc_chat(chat_id))
@@ -116,7 +151,7 @@ async def vclogger_command(_, message: Message):
 
     elif arg in ("off", "disable", "no"):
         if not await get_vc_logger_status(chat_id):
-            return await message.reply("ℹ️ <b>ᴠ¢ ℓσggєʀ is already disabled.</b>")
+            return await message.reply("ℹ️ <b>ᴠ¢ ℓσggєʀ already disabled hai.</b>")
         vc_logging_status[chat_id] = False
         active_vc_chats.discard(chat_id)
         vc_active_users.pop(chat_id, None)
@@ -125,21 +160,21 @@ async def vclogger_command(_, message: Message):
 
 # ───────── MONITOR VC ─────────
 async def monitor_vc_chat(chat_id: int):
-    # Assistant fallback if available, else bot itself
     userbot = await get_assistant(chat_id)
 
     while chat_id in active_vc_chats and await get_vc_logger_status(chat_id):
         try:
-            # First try Bot client (no assistant join needed)
             participants = await get_group_call_participants(app, chat_id)
             if not participants and userbot:
                 participants = await get_group_call_participants(userbot, chat_id)
 
-            new_users = {
-                p.peer.user_id
-                for p in participants
-                if hasattr(p.peer, "user_id")
-            }
+            new_users = set()
+            for p in participants:
+                uid = getattr(p, "user_id", None)
+                if not uid and hasattr(p, "peer") and hasattr(p.peer, "user_id"):
+                    uid = p.peer.user_id
+                if uid:
+                    new_users.add(uid)
 
             old_users = vc_active_users.get(chat_id, set())
 
@@ -152,7 +187,7 @@ async def monitor_vc_chat(chat_id: int):
             vc_active_users[chat_id] = new_users
 
         except Exception as e:
-            LOGGER.error(f"VC Monitor Loop Error: {e}")
+            LOGGER.error(f"VC Monitor Error: {e}")
 
         await asyncio.sleep(5)
 
@@ -219,15 +254,15 @@ async def handle_user_leave(chat_id: int, user_id: int):
         LOGGER.error(f"Leave Log Error: {e}")
 
 
-# ───────── VC MEMBERS COMMAND (ANYONE CAN RUN - NO BOT ADMIN NEEDED) ─────────
+# ───────── VC MEMBERS COMMAND (OPEN FOR EVERYONE - NO BOT ADMIN REQUIRED) ─────────
 @app.on_message(filters.command(["vcmembers", "seevc"], prefixes=["/", "!"]) & filters.group)
 async def vcmembers_command(_, message: Message):
     chat_id = message.chat.id
 
-    # 1. Fetch through Main Bot directly (No Assistant in group required)
+    # 1. Fetch through Main Bot directly
     participants = await get_group_call_participants(app, chat_id)
 
-    # 2. Fallback to Assistant only if Bot gets empty list
+    # 2. Fallback to Assistant if Bot gets empty list
     if not participants:
         userbot = await get_assistant(chat_id)
         if userbot:
