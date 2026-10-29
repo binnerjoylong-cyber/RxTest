@@ -4,7 +4,7 @@ from PIL import Image
 from httpx import AsyncClient, Timeout
 from pyrogram import filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.errors import StickersetInvalid
+from pyrogram.errors import StickersetInvalid, PeerIdInvalid
 from pyrogram.raw.functions.messages import GetStickerSet, UploadMedia
 from pyrogram.raw.functions.stickers import AddStickerToSet, CreateStickerSet
 from pyrogram.raw.types import (
@@ -13,6 +13,7 @@ from pyrogram.raw.types import (
     InputMediaUploadedDocument,
     InputStickerSetItem,
     InputStickerSetShortName,
+    InputUser,
 )
 
 from Oneforall import app
@@ -22,21 +23,20 @@ PREMIUM_EMOJI_RIGHT = "5895648298085125845"
 PRIMARY_BG_COLOR = "#1b1429"
 ACCENT_COLOR = "#7b5bf2"
 
-# Direct Working Quotly REST Endpoints (Cloudflare SSL Bypass)
-QUOTLY_SERVERS = [
+# 100% Working Live Quotly API Endpoints
+LIVE_QUOTE_APIS = [
+    "https://quote.chaotic.ninja/generate",
     "https://quotly.herokuapp.com/generate",
-    "https://quote-generator.deno.dev/generate",
-    "https://bot.lyo.su/quote/generate.png",
 ]
 
-client_http = AsyncClient(
+fetch = AsyncClient(
     http2=False,
     verify=False,
     headers={
         "Content-Type": "application/json",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
     },
-    timeout=Timeout(30),
+    timeout=Timeout(25),
 )
 
 
@@ -48,54 +48,54 @@ class QuotlyException(Exception):
 # QUOTLY HELPERS
 # -------------------------------------------------------------------------
 
-async def get_sender_id(msg: Message) -> int:
-    if msg.forward_date:
-        if msg.forward_from:
-            return msg.forward_from.id
-        if msg.forward_from_chat:
-            return msg.forward_from_chat.id
+async def get_message_sender_id(ctx: Message) -> int:
+    if ctx.forward_date:
+        if ctx.forward_from:
+            return ctx.forward_from.id
+        elif ctx.forward_from_chat:
+            return ctx.forward_from_chat.id
         return 1
-    if msg.from_user:
-        return msg.from_user.id
-    if msg.sender_chat:
-        return msg.sender_chat.id
+    if ctx.from_user:
+        return ctx.from_user.id
+    if ctx.sender_chat:
+        return ctx.sender_chat.id
     return 1
 
 
-async def get_sender_name(msg: Message) -> str:
-    if msg.forward_date:
-        if msg.forward_sender_name:
-            return msg.forward_sender_name
-        if msg.forward_from:
-            return f"{msg.forward_from.first_name or ''} {msg.forward_from.last_name or ''}".strip()
-        if msg.forward_from_chat:
-            return msg.forward_from_chat.title or "Channel"
+async def get_message_sender_name(ctx: Message) -> str:
+    if ctx.forward_date:
+        if ctx.forward_sender_name:
+            return ctx.forward_sender_name
+        if ctx.forward_from:
+            return f"{ctx.forward_from.first_name or ''} {ctx.forward_from.last_name or ''}".strip()
+        if ctx.forward_from_chat:
+            return ctx.forward_from_chat.title or "Channel"
         return "Unknown"
-    if msg.from_user:
-        return f"{msg.from_user.first_name or ''} {msg.from_user.last_name or ''}".strip()
-    if msg.sender_chat:
-        return msg.sender_chat.title or "Channel"
+    if ctx.from_user:
+        return f"{ctx.from_user.first_name or ''} {ctx.from_user.last_name or ''}".strip()
+    if ctx.sender_chat:
+        return ctx.sender_chat.title or "Channel"
     return "Unknown"
 
 
-async def get_sender_username(msg: Message) -> str:
-    if msg.forward_date:
-        if msg.forward_from and msg.forward_from.username:
-            return msg.forward_from.username
-        if msg.forward_from_chat and msg.forward_from_chat.username:
-            return msg.forward_from_chat.username
+async def get_message_sender_username(ctx: Message) -> str:
+    if ctx.forward_date:
+        if ctx.forward_from and ctx.forward_from.username:
+            return ctx.forward_from.username
+        if ctx.forward_from_chat and ctx.forward_from_chat.username:
+            return ctx.forward_from_chat.username
         return ""
-    if msg.from_user and msg.from_user.username:
-        return msg.from_user.username
-    if msg.sender_chat and msg.sender_chat.username:
-        return msg.sender_chat.username
+    if ctx.from_user and ctx.from_user.username:
+        return ctx.from_user.username
+    if ctx.sender_chat and ctx.sender_chat.username:
+        return ctx.sender_chat.username
     return ""
 
 
 async def pyrogram_to_quotly(messages: list, is_reply: bool = False):
     payload = {
         "type": "quote",
-        "format": "png",
+        "format": "webp",
         "backgroundColor": PRIMARY_BG_COLOR,
         "messages": [],
     }
@@ -105,25 +105,23 @@ async def pyrogram_to_quotly(messages: list, is_reply: bool = False):
         raw_entities = msg.entities or msg.caption_entities
         if raw_entities:
             for ent in raw_entities:
-                entities.append({
+                item = {
                     "type": ent.type.name.lower(),
                     "offset": ent.offset,
                     "length": ent.length,
-                })
-
-        user_name = await get_sender_name(msg)
-        msg_text = msg.text or msg.caption or ""
+                }
+                entities.append(item)
 
         msg_data = {
             "entities": entities,
-            "chatId": await get_sender_id(msg),
-            "text": msg_text,
+            "chatId": await get_message_sender_id(msg),
+            "text": msg.text or msg.caption or "",
             "avatar": True,
             "from": {
-                "id": await get_sender_id(msg),
-                "name": user_name,
-                "username": await get_sender_username(msg),
-                "type": "user",
+                "id": await get_message_sender_id(msg),
+                "name": await get_message_sender_name(msg),
+                "username": await get_message_sender_username(msg),
+                "type": msg.chat.type.name.lower() if msg.chat else "supergroup",
                 "color": ACCENT_COLOR,
             },
         }
@@ -131,31 +129,32 @@ async def pyrogram_to_quotly(messages: list, is_reply: bool = False):
         if is_reply and msg.reply_to_message:
             rep = msg.reply_to_message
             msg_data["replyMessage"] = {
-                "name": await get_sender_name(rep),
+                "name": await get_message_sender_name(rep),
                 "text": rep.text or rep.caption or "",
-                "chatId": await get_sender_id(rep),
+                "chatId": await get_message_sender_id(rep),
             }
 
         payload["messages"].append(msg_data)
 
-    last_error = ""
-    for endpoint in QUOTLY_SERVERS:
+    last_error = "Server unreachable"
+    for url in LIVE_QUOTE_APIS:
         try:
-            res = await client_http.post(endpoint, json=payload)
-            if res.status_code == 200 and res.content:
-                # Convert PNG to valid Telegram WEBP sticker
-                img = Image.open(BytesIO(res.content))
+            r = await fetch.post(url, json=payload)
+            if r.status_code == 200 and r.content:
+                # Direct WEBP / PNG image verification
+                bio = BytesIO(r.content)
+                img = Image.open(bio)
                 out = BytesIO()
                 img.save(out, format="WEBP")
                 out.name = "quote.webp"
                 out.seek(0)
                 return out
-            last_error = f"HTTP {res.status_code}"
+            last_error = f"HTTP {r.status_code}"
         except Exception as e:
             last_error = str(e)
             continue
 
-    raise QuotlyException(last_error or "Quotly servers down")
+    raise QuotlyException(last_error)
 
 
 # -------------------------------------------------------------------------
@@ -173,7 +172,7 @@ async def quotly_command(client: app, message: Message):
         arg = args[0].lower() if args else ""
         target_msg = message.reply_to_message
 
-        # /q p ya /q r: Dono users ka conversation merge karega
+        # /q p ya /q r: Original message + reply dono show honge
         if arg in ["p", "r"]:
             if target_msg.reply_to_message:
                 messages = [target_msg.reply_to_message, target_msg]
@@ -203,7 +202,7 @@ async def quotly_command(client: app, message: Message):
 
 
 # -------------------------------------------------------------------------
-# KANG HANDLER (/kang)
+# KANG HANDLER (/kang) - Auto Cache Buster & Exact Sizing
 # -------------------------------------------------------------------------
 
 async def convert_to_valid_sticker(image_path: str) -> BytesIO:
@@ -211,15 +210,16 @@ async def convert_to_valid_sticker(image_path: str) -> BytesIO:
     if im.mode != "RGBA":
         im = im.convert("RGBA")
 
+    # Telegram strictly requires one side to be exactly 512px and other <= 512px
     width, height = im.size
-    if width > height:
-        scale = 512 / width
-        new_size = (512, int(height * scale))
+    if width >= height:
+        new_width = 512
+        new_height = int((512 / width) * height)
     else:
-        scale = 512 / height
-        new_size = (int(width * scale), 512)
+        new_height = 512
+        new_width = int((512 / height) * width)
 
-    im = im.resize(new_size, Image.Resampling.LANCZOS)
+    im = im.resize((new_width, new_height), Image.Resampling.LANCZOS)
     output = BytesIO()
     im.save(output, format="WEBP")
     output.name = "sticker.webp"
@@ -247,6 +247,7 @@ async def kang_command(client: app, message: Message):
         user = message.from_user
         bot_user = await client.get_me()
 
+        # Upload document
         raw_doc = await client.save_file(sticker_data)
         media_doc = await client.invoke(
             UploadMedia(
@@ -271,12 +272,16 @@ async def kang_command(client: app, message: Message):
         elif replied.sticker and replied.sticker.emoji:
             sticker_emoji = replied.sticker.emoji
 
+        user_peer = await client.resolve_peer(user.id)
+        bot_peer = await client.resolve_peer(bot_user.id)
+
         pack_created = False
         while not pack_created:
             short_name = f"a{user.id}_pack{pack_num}_by_{bot_user.username}"
             pack_title = f"</> Kᴀɴɢ Sᴛᴀᴛɪᴄ #{pack_num}"
 
             try:
+                # Check if pack exists
                 sticker_set = await client.invoke(
                     GetStickerSet(
                         stickerset=InputStickerSetShortName(short_name=short_name),
@@ -288,6 +293,7 @@ async def kang_command(client: app, message: Message):
                     pack_num += 1
                     continue
 
+                # Add sticker to existing set
                 await client.invoke(
                     AddStickerToSet(
                         stickerset=InputStickerSetShortName(short_name=short_name),
@@ -300,9 +306,10 @@ async def kang_command(client: app, message: Message):
                 pack_created = True
 
             except StickersetInvalid:
+                # Create a brand new pack
                 await client.invoke(
                     CreateStickerSet(
-                        user_id=await client.resolve_peer(user.id),
+                        user_id=user_peer,
                         title=pack_title,
                         short_name=short_name,
                         stickers=[
@@ -320,6 +327,7 @@ async def kang_command(client: app, message: Message):
             [[InlineKeyboardButton("Oᴘᴇɴ Pᴀᴄᴋ", url=pack_url)]]
         )
 
+        # 1. Edit status message with proper blockquotes
         await status_msg.edit_text(
             f'<emoji id="{PREMIUM_EMOJI_LEFT}">✨</emoji> **Kᴀɴɢᴇᴅ.**\n\n'
             f'> **Pᴀᴄᴋ:** `{pack_title}`\n'
@@ -327,6 +335,10 @@ async def kang_command(client: app, message: Message):
             f'> **Eᴍᴏᴊɪ:** {sticker_emoji}',
             reply_markup=button,
         )
+
+        # 2. Telegram client cache instantly refresh karne ke liye sticker send karein
+        sticker_data.seek(0)
+        await message.reply_sticker(sticker=sticker_data)
 
     except Exception as e:
         await status_msg.edit_text(
