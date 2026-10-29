@@ -1,12 +1,10 @@
 import os
-import re
-import textwrap
 from io import BytesIO
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 from httpx import AsyncClient, Timeout
-from pyrogram import filters
+from pyrogram import filters, enums
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.errors import StickersetInvalid
+from pyrogram.errors import StickersetInvalid, PeerIdInvalid
 from pyrogram.raw.functions.messages import GetStickerSet, UploadMedia
 from pyrogram.raw.functions.stickers import AddStickerToSet, CreateStickerSet
 from pyrogram.raw.types import (
@@ -31,126 +29,76 @@ http_client = AsyncClient(
         "Content-Type": "application/json",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     },
-    timeout=Timeout(25),
+    timeout=Timeout(30),
 )
 
 
+class QuotlyException(Exception):
+    pass
+
+
 # -------------------------------------------------------------------------
-# UTF-8 SAFE FALLBACK QUOTE GENERATOR
+# QUOTLY PAYLOAD BUILDER
 # -------------------------------------------------------------------------
 
-def sanitize_text(text: str) -> str:
-    """Non-ASCII characters ko safe string me badalta hai taaki Pillow crash na kare"""
-    if not text:
+def get_name(user) -> str:
+    if not user:
+        return "Unknown"
+    first = getattr(user, "first_name", "") or getattr(user, "title", "")
+    last = getattr(user, "last_name", "") or ""
+    return f"{first} {last}".strip() or "User"
+
+
+def get_username(user) -> str:
+    if not user:
         return ""
-    # Safe unicode cleaning
-    return text.encode("utf-8", "ignore").decode("utf-8")
+    return getattr(user, "username", "") or ""
 
 
-def draw_rounded_rect(draw, coords, radius, fill):
-    draw.rounded_rectangle(coords, radius=radius, fill=fill)
+async def parse_entities(msg: Message) -> list:
+    entities = []
+    raw_ents = msg.entities or msg.caption_entities
+    if raw_ents:
+        for ent in raw_ents:
+            ent_type = ent.type.name.lower() if hasattr(ent.type, "name") else str(ent.type).lower()
+            item = {
+                "type": ent_type,
+                "offset": ent.offset,
+                "length": ent.length,
+            }
+            if hasattr(ent, "custom_emoji_id") and ent.custom_emoji_id:
+                item["customEmojiId"] = str(ent.custom_emoji_id)
+            entities.append(item)
+    return entities
 
 
-async def generate_local_quote(messages: list) -> BytesIO:
-    card_width = 512
-    margin_x = 20
-    content_width = card_width - (margin_x * 2)
+async def build_quotly_msg(msg: Message) -> dict:
+    sender = msg.from_user or msg.sender_chat
+    sender_id = sender.id if sender else 1
+    sender_name = get_name(sender)
+    sender_username = get_username(sender)
 
-    try:
-        # Standard system font use karein jo Unicode handle kare
-        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14)
-        font_bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 15)
-    except Exception:
-        font = ImageFont.load_default()
-        font_bold = font
-
-    items = []
-    total_height = 20
-
-    for msg in messages:
-        sender_name = sanitize_text(
-            f"{msg.from_user.first_name or ''} {msg.from_user.last_name or ''}".strip()
-            if msg.from_user
-            else (msg.sender_chat.title if msg.sender_chat else "User")
-        )
-        raw_text = sanitize_text(msg.text or msg.caption or "Media")
-
-        wrapped_lines = textwrap.wrap(raw_text, width=38)
-        if not wrapped_lines:
-            wrapped_lines = [""]
-
-        reply_info = None
-        if msg.reply_to_message and len(messages) == 1:
-            rep = msg.reply_to_message
-            rep_user = sanitize_text(
-                f"{rep.from_user.first_name or ''} {rep.from_user.last_name or ''}".strip()
-                if rep.from_user
-                else "User"
-            )
-            rep_text = sanitize_text(rep.text or rep.caption or "Media")
-            rep_text = (rep_text[:28] + "...") if len(rep_text) > 28 else rep_text
-            reply_info = {"user": rep_user, "text": rep_text}
-
-        bubble_h = 32 + (len(wrapped_lines) * 18)
-        if reply_info:
-            bubble_h += 42
-
-        items.append({
+    msg_dict = {
+        "entities": await parse_entities(msg),
+        "chatId": sender_id,
+        "text": msg.text or msg.caption or "",
+        "avatar": True,
+        "from": {
+            "id": sender_id,
             "name": sender_name,
-            "lines": wrapped_lines,
-            "reply": reply_info,
-            "bubble_h": bubble_h,
-        })
-        total_height += bubble_h + 15
+            "username": sender_username,
+            "type": "user",
+            "color": ACCENT_COLOR,
+        },
+    }
 
-    img = Image.new("RGBA", (card_width, total_height), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
+    if msg.from_user and msg.from_user.emoji_status:
+        msg_dict["emojiStatus"] = str(msg.from_user.emoji_status.custom_emoji_id)
 
-    curr_y = 15
-    for item in items:
-        # Bubble Box
-        draw_rounded_rect(
-            draw,
-            (margin_x, curr_y, margin_x + content_width, curr_y + item["bubble_h"]),
-            radius=16,
-            fill=(27, 20, 41, 245),
-        )
-
-        # Sender Name
-        draw.text((margin_x + 15, curr_y + 8), item["name"], fill=(195, 140, 255), font=font_bold)
-
-        offset_y = curr_y + 30
-
-        if item["reply"]:
-            rx1 = margin_x + 15
-            ry1 = offset_y
-            rx2 = margin_x + content_width - 15
-            ry2 = offset_y + 36
-
-            draw_rounded_rect(draw, (rx1, ry1, rx2, ry2), radius=6, fill=(45, 33, 68))
-            draw.rectangle([rx1, ry1, rx1 + 3, ry2], fill=(123, 91, 242))
-            draw.text((rx1 + 8, ry1 + 3), item["reply"]["user"], fill=(160, 160, 255), font=font)
-            draw.text((rx1 + 8, ry1 + 18), item["reply"]["text"], fill=(210, 210, 210), font=font)
-            offset_y += 42
-
-        for line in item["lines"]:
-            draw.text((margin_x + 15, offset_y), line, fill=(255, 255, 255), font=font)
-            offset_y += 18
-
-        curr_y += item["bubble_h"] + 15
-
-    out = BytesIO()
-    img.save(out, format="WEBP")
-    out.name = "quote.webp"
-    out.seek(0)
-    return out
+    return msg_dict
 
 
-# -------------------------------------------------------------------------
-# QUOTLY API HANDLER
-# -------------------------------------------------------------------------
-
-async def fetch_quotly_api(messages: list, is_reply: bool = False):
+async def pyrogram_to_quotly(messages: list, is_reply: bool = False) -> BytesIO:
     payload = {
         "type": "quote",
         "format": "webp",
@@ -159,63 +107,25 @@ async def fetch_quotly_api(messages: list, is_reply: bool = False):
     }
 
     for msg in messages:
-        entities = []
-        raw_entities = msg.entities or msg.caption_entities
-        if raw_entities:
-            for ent in raw_entities:
-                entities.append({
-                    "type": ent.type.name.lower(),
-                    "offset": ent.offset,
-                    "length": ent.length,
-                })
-
-        sender_id = msg.from_user.id if msg.from_user else (msg.sender_chat.id if msg.sender_chat else 1)
-        sender_name = (
-            f"{msg.from_user.first_name or ''} {msg.from_user.last_name or ''}".strip()
-            if msg.from_user
-            else (msg.sender_chat.title if msg.sender_chat else "User")
-        )
-        sender_username = (
-            msg.from_user.username
-            if msg.from_user and msg.from_user.username
-            else (msg.sender_chat.username if msg.sender_chat and msg.sender_chat.username else "")
-        )
-
-        msg_data = {
-            "entities": entities,
-            "chatId": sender_id,
-            "text": msg.text or msg.caption or "",
-            "avatar": True,
-            "from": {
-                "id": sender_id,
-                "name": sender_name,
-                "username": sender_username,
-                "type": msg.chat.type.name.lower() if msg.chat else "supergroup",
-                "color": ACCENT_COLOR,
-            },
-        }
+        msg_dict = await build_quotly_msg(msg)
 
         if is_reply and msg.reply_to_message:
             rep = msg.reply_to_message
-            rep_name = (
-                f"{rep.from_user.first_name or ''} {rep.from_user.last_name or ''}".strip()
-                if rep.from_user
-                else "User"
-            )
-            msg_data["replyMessage"] = {
-                "name": rep_name,
-                "text": rep.text or rep.caption or "",
-                "chatId": rep.from_user.id if rep.from_user else 1,
+            rep_sender = rep.from_user or rep.sender_chat
+            msg_dict["replyMessage"] = {
+                "name": get_name(rep_sender),
+                "text": rep.text or rep.caption or "Media",
+                "chatId": rep_sender.id if rep_sender else 1,
             }
 
-        payload["messages"].append(msg_data)
+        payload["messages"].append(msg_dict)
 
-    # Online API primary call
     endpoints = [
         "https://bot.lyo.su/quote/generate",
         "https://quote.chaotic.ninja/generate",
     ]
 
+    last_err = ""
     for url in endpoints:
         try:
             res = await http_client.post(url, json=payload)
@@ -224,11 +134,12 @@ async def fetch_quotly_api(messages: list, is_reply: bool = False):
                 out.name = "quote.webp"
                 out.seek(0)
                 return out
-        except Exception:
+            last_err = f"HTTP {res.status_code}"
+        except Exception as e:
+            last_err = str(e)
             continue
 
-    # Agar API fail ho jaye toh safe local image generator run hoga
-    return await generate_local_quote(messages)
+    raise QuotlyException(last_err or "Quotly server offline")
 
 
 # -------------------------------------------------------------------------
@@ -238,7 +149,8 @@ async def fetch_quotly_api(messages: list, is_reply: bool = False):
 @app.on_message(filters.command(["q", "quote"]) & filters.reply)
 async def quotly_command(client: app, message: Message):
     status_msg = await message.reply_text(
-        f'<emoji id="{PREMIUM_EMOJI_LEFT}">⚡</emoji> **Gᴇɴᴇʀᴀᴛɪɴɢ Qᴜᴏᴛᴇ...**'
+        f'<emoji id="{PREMIUM_EMOJI_LEFT}">⚡</emoji> <b>Gᴇɴᴇʀᴀᴛɪɴɢ Qᴜᴏᴛᴇ...</b>',
+        parse_mode=enums.ParseMode.HTML,
     )
 
     try:
@@ -246,7 +158,7 @@ async def quotly_command(client: app, message: Message):
         arg = args[0].lower() if args else ""
         target_msg = message.reply_to_message
 
-        # /q p ya /q r
+        # /q p ya /q r: Dono users ka conversation bubble
         if arg in ["p", "r"]:
             if target_msg.reply_to_message:
                 messages = [target_msg.reply_to_message, target_msg]
@@ -263,20 +175,21 @@ async def quotly_command(client: app, message: Message):
             messages = [target_msg]
             is_reply = bool(target_msg.reply_to_message)
 
-        sticker_file = await fetch_quotly_api(messages, is_reply=is_reply)
+        sticker_file = await pyrogram_to_quotly(messages, is_reply=is_reply)
 
         await message.reply_sticker(sticker=sticker_file)
         await status_msg.delete()
 
     except Exception as e:
         await status_msg.edit_text(
-            f'<emoji id="{PREMIUM_EMOJI_RIGHT}">❌</emoji> **Eʀʀᴏʀ:**\n'
-            f'> `{str(e)}`'
+            f'<emoji id="{PREMIUM_EMOJI_RIGHT}">❌</emoji> <b>Eʀʀᴏʀ:</b>\n'
+            f'<blockquote><code>{str(e)}</code></blockquote>',
+            parse_mode=enums.ParseMode.HTML,
         )
 
 
 # -------------------------------------------------------------------------
-# KANG HANDLER (/kang)
+# KANG HANDLER (/kang) - Auto Pack Append (120 Limit per pack)
 # -------------------------------------------------------------------------
 
 async def convert_to_valid_sticker(image_path: str) -> BytesIO:
@@ -305,11 +218,13 @@ async def kang_command(client: app, message: Message):
     replied = message.reply_to_message
     if not (replied.photo or replied.sticker or replied.document):
         return await message.reply_text(
-            f'<emoji id="{PREMIUM_EMOJI_RIGHT}">❌</emoji> **Kʀɪᴘʏᴀ ᴋɪsɪ ᴘʜᴏᴛᴏ, sᴛɪᴄᴋᴇʀ ʏᴀ ᴅᴏᴄᴜᴍᴇɴᴛ ᴘᴀʀ ʀᴇᴘʟʏ ᴋᴀʀᴇɪɴ.**'
+            f'<emoji id="{PREMIUM_EMOJI_RIGHT}">❌</emoji> <b>Kʀɪᴘʏᴀ ᴋɪsɪ ᴘʜᴏᴛᴏ, sᴛɪᴄᴋᴇʀ ʏᴀ ᴅᴏᴄᴜᴍᴇɴᴛ ᴘᴀʀ ʀᴇᴘʟʏ ᴋᴀʀᴇɪɴ.</b>',
+            parse_mode=enums.ParseMode.HTML,
         )
 
     status_msg = await message.reply_text(
-        f'<emoji id="{PREMIUM_EMOJI_LEFT}">⚡</emoji> **Pʀᴏᴄᴇssɪɴɢ Sᴛɪᴄᴋᴇʀ...**'
+        f'<emoji id="{PREMIUM_EMOJI_LEFT}">⚡</emoji> <b>Pʀᴏᴄᴇssɪɴɢ Sᴛɪᴄᴋᴇʀ...</b>',
+        parse_mode=enums.ParseMode.HTML,
     )
 
     temp_path = None
@@ -347,6 +262,10 @@ async def kang_command(client: app, message: Message):
         user_peer = await client.resolve_peer(user.id)
 
         pack_created = False
+        stickers_count = 1
+        short_name = ""
+        pack_title = ""
+
         while not pack_created:
             short_name = f"a{user.id}_pack{pack_num}_by_{bot_user.username}"
             pack_title = f"</> Kᴀɴɢ Sᴛᴀᴛɪᴄ #{pack_num}"
@@ -363,6 +282,7 @@ async def kang_command(client: app, message: Message):
                     pack_num += 1
                     continue
 
+                # Add to existing pack
                 await client.invoke(
                     AddStickerToSet(
                         stickerset=InputStickerSetShortName(short_name=short_name),
@@ -372,9 +292,11 @@ async def kang_command(client: app, message: Message):
                         ),
                     )
                 )
+                stickers_count = sticker_set.set.count + 1
                 pack_created = True
 
             except StickersetInvalid:
+                # Create brand new set
                 await client.invoke(
                     CreateStickerSet(
                         user_id=user_peer,
@@ -388,6 +310,7 @@ async def kang_command(client: app, message: Message):
                         ],
                     )
                 )
+                stickers_count = 1
                 pack_created = True
 
         pack_url = f"https://t.me/addstickers/{short_name}"
@@ -395,21 +318,31 @@ async def kang_command(client: app, message: Message):
             [[InlineKeyboardButton("Oᴘᴇɴ Pᴀᴄᴋ", url=pack_url)]]
         )
 
+        caption_text = (
+            f'<emoji id="{PREMIUM_EMOJI_LEFT}">✨</emoji> <b>Kᴀɴɢᴇᴅ.</b>\n\n'
+            f'<blockquote>'
+            f'<b>Pᴀᴄᴋ:</b> <code>{pack_title}</code>\n'
+            f'<b>Tʏᴘᴇ:</b> <code>ʀᴇɢᴜʟᴀʀ</code>\n'
+            f'<b>Sᴛɪᴄᴋᴇʀs:</b> <code>{stickers_count}</code>\n'
+            f'<b>Eᴍᴏᴊɪ:</b> {sticker_emoji}'
+            f'</blockquote>'
+        )
+
         await status_msg.edit_text(
-            f'<emoji id="{PREMIUM_EMOJI_LEFT}">✨</emoji> **Kᴀɴɢᴇᴅ.**\n\n'
-            f'> **Pᴀᴄᴋ:** `{pack_title}`\n'
-            f'> **Tʏᴘᴇ:** `ʀᴇɢᴜʟᴀʀ`\n'
-            f'> **Eᴍᴏᴊɪ:** {sticker_emoji}',
+            caption_text,
+            parse_mode=enums.ParseMode.HTML,
             reply_markup=button,
         )
 
+        # Send sticker to chat so Telegram immediately refreshes the set preview
         sticker_data.seek(0)
         await message.reply_sticker(sticker=sticker_data)
 
     except Exception as e:
         await status_msg.edit_text(
-            f'<emoji id="{PREMIUM_EMOJI_RIGHT}">❌</emoji> **Eʀʀᴏʀ:**\n'
-            f'> `{str(e)}`'
+            f'<emoji id="{PREMIUM_EMOJI_RIGHT}">❌</emoji> <b>Eʀʀᴏʀ:</b>\n'
+            f'<blockquote><code>{str(e)}</code></blockquote>',
+            parse_mode=enums.ParseMode.HTML,
         )
     finally:
         if temp_path and os.path.exists(temp_path):
@@ -423,17 +356,21 @@ async def kang_command(client: app, message: Message):
 __MODULE__ = "Qᴜᴏᴛᴇ"
 
 __HELP__ = """
-**Qᴜᴏᴛᴇ & Sᴛɪᴄᴋᴇʀ Mᴏᴅᴜʟᴇ**
+<b>Qᴜᴏᴛᴇ & Sᴛɪᴄᴋᴇʀ Mᴏᴅᴜʟᴇ</b>
 
-**Qᴜᴏᴛᴇ Cᴏᴍᴍᴀɴᴅs:**
-> • `/q` : Qᴜᴏᴛᴇ ᴀ sɪɴɢʟᴇ ᴍᴇssᴀɢᴇ.
-> • `/q p` ᴏʀ `/q r` : Qᴜᴏᴛᴇ ʀᴇᴘʟɪᴇᴅ ᴍᴇssᴀɢᴇ ᴡɪᴛʜ ɪᴛs ᴘᴀʀᴇɴᴛ ᴍᴇssᴀɢᴇ.
-> • `/q [1-10]` : Qᴜᴏᴛᴇ ᴍᴜʟᴛɪᴘʟᴇ ᴍᴇssᴀɢᴇs ᴀᴛ ᴏɴᴄᴇ (ᴇ.ɢ. `/q 3`).
+<b>Qᴜᴏᴛᴇ Cᴏᴍᴍᴀɴᴅs:</b>
+<blockquote>
+• <code>/q</code> : Qᴜᴏᴛᴇ ᴀ sɪɴɢʟᴇ ᴍᴇssᴀɢᴇ.
+• <code>/q p</code> ᴏʀ <code>/q r</code> : Qᴜᴏᴛᴇ ʀᴇᴘʟɪᴇᴅ ᴍᴇssᴀɢᴇ ᴡɪᴛʜ ɪᴛs ᴘᴀʀᴇɴᴛ ᴍᴇssᴀɢᴇ.
+• <code>/q [1-10]</code> : Qᴜᴏᴛᴇ ᴍᴜʟᴛɪᴘʟᴇ ᴍᴇssᴀɢᴇs ᴀᴛ ᴏɴᴄᴇ (ᴇ.ɢ. <code>/q 3</code>).
+</blockquote>
 
-**Sᴛɪᴄᴋᴇʀ Kᴀɴɢ Cᴏᴍᴍᴀɴᴅs:**
-> • `/kang` : Kᴀɴɢ sᴛɪᴄᴋᴇʀ, ᴘʜᴏᴛᴏ ᴏʀ ᴅᴏᴄᴜᴍᴇɴᴛ ᴛᴏ ʏᴏᴜʀ ᴘᴇʀsᴏɴᴀʟ ᴘᴀᴄᴋ.
-> • `/kang [emoji]` : Kᴀɴɢ ᴡɪᴛʜ ʏᴏᴜʀ ᴄᴜsᴛᴏᴍ ᴇᴍᴏᴊɪ (ᴇ.ɢ. `/kang 🔥`).
+<b>Sᴛɪᴄᴋᴇʀ Kᴀɴɢ Cᴏᴍᴍᴀɴᴅs:</b>
+<blockquote>
+• <code>/kang</code> : Kᴀɴɢ sᴛɪᴄᴋᴇʀ, ᴘʜᴏᴛᴏ ᴏʀ ᴅᴏᴄᴜᴍᴇɴᴛ ᴛᴏ ʏᴏᴜʀ ᴘᴇʀsᴏɴᴀʟ ᴘᴀᴄᴋ.
+• <code>/kang [emoji]</code> : Kᴀɴɢ ᴡɪᴛʜ ʏᴏᴜʀ ᴄᴜsᴛᴏᴍ ᴇᴍᴏᴊɪ (ᴇ.ɢ. <code>/kang 🔥</code>).
+</blockquote>
 
-**Nᴏᴛᴇ:**
-> • Hᴀᴍᴇsʜᴀ ᴛᴀʀɢᴇᴛ ᴍᴇssᴀɢᴇ ʏᴀ ᴍᴇᴅɪᴀ ᴘᴀʀ **Rᴇᴘʟʏ** ᴋᴀʀᴋᴇ ʜɪ ᴄᴏᴍᴍᴀɴᴅ ᴜsᴇ ᴋᴀʀᴇɪɴ.
+<b>Nᴏᴛᴇ:</b>
+<blockquote>• Hᴀᴍᴇsʜᴀ ᴛᴀʀɢᴇᴛ ᴍᴇssᴀɢᴇ ʏᴀ ᴍᴇᴅɪᴀ ᴘᴀʀ <b>Rᴇᴘʟʏ</b> ᴋᴀʀᴋᴇ ʜɪ ᴄᴏᴍᴍᴀɴᴅ ᴜsᴇ ᴋᴀʀᴇɪɴ.</blockquote>
 """
